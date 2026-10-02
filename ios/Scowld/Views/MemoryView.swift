@@ -141,6 +141,46 @@ struct MemoryView: View {
                 .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
             }
+
+            Section {
+                NavigationLink {
+                    LongTermMemoryEditor(memoryStore: memoryStore)
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "brain.head.profile")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundStyle(.amicaBlue)
+                            .frame(width: 36, height: 36)
+                            .background(.white.opacity(0.08), in: Circle())
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Long-term memory")
+                                .font(.body.weight(.semibold))
+                                .foregroundStyle(.primary)
+                            Text("Facts added to every chat")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer()
+
+                        Image(systemName: "chevron.right")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .strokeBorder(.white.opacity(0.08), lineWidth: 0.5)
+                    )
+                }
+                .buttonStyle(.plain)
+                .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 18, trailing: 20))
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
+            }
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
@@ -428,6 +468,85 @@ private struct PastChatMessageRow: View {
         case .user: .secondary
         case .assistant: .amicaBlue
         case .system: .secondary
+        }
+    }
+}
+
+// MARK: - Long-term memory editor
+
+/// Free-form notes that are prepended to the system prompt for every chat, so the
+/// companion keeps remembering things even in a brand new conversation.
+///
+/// The storage layer (`MemoryStore.memoryLog`) existed already but nothing ever
+/// wrote to it or read it. This screen is the write path and
+/// `ContextBuilder` is the read path.
+private struct LongTermMemoryEditor: View {
+    let memoryStore: MemoryStore
+
+    @State private var text = ""
+    @State private var savedText = ""
+    @Environment(\.dismiss) private var dismiss
+
+    private var hasChanges: Bool { text != savedText }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Anything you write here is added to every conversation, including new chats. Good things to keep: your name, how you like to be talked to, ongoing projects, important dates.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 20)
+
+            ZStack(alignment: .topLeading) {
+                if text.isEmpty {
+                    Text("- My name is …\n- I'm working on …")
+                        .font(.body)
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 17)
+                        .padding(.vertical, 20)
+                        .allowsHitTesting(false)
+                }
+
+                TextEditor(text: $text)
+                    .font(.body)
+                    .scrollContentBackground(.hidden)
+                    .padding(12)
+            }
+            .frame(maxHeight: .infinity)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(.white.opacity(0.08), lineWidth: 0.5)
+            )
+            .padding(.horizontal, 20)
+
+            HStack(spacing: 12) {
+                Button("Clear") { text = "" }
+                    .foregroundStyle(.red)
+                    .disabled(text.isEmpty)
+
+                Spacer()
+
+                Button {
+                    memoryStore.updateMemoryLog(text)
+                    savedText = text
+                    dismiss()
+                } label: {
+                    Label("Save", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(hasChanges ? Color.amicaBlue : Color.secondary)
+                }
+                .disabled(!hasChanges)
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 12)
+        }
+        .padding(.top, 12)
+        .background(Color.black.ignoresSafeArea())
+        .navigationTitle("Long-term memory")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            let current = memoryStore.getActiveMemoryLog()
+            text = current
+            savedText = current
         }
     }
 }

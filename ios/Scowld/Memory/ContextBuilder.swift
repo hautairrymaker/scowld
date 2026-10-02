@@ -10,12 +10,17 @@ struct ContextBuilder {
     func buildSystemPrompt(visionDescription: String? = nil) -> String {
         let characterName = CharacterPack.resolveCharacterName()
         let pastConversation = memoryStore.buildContextFromActiveSlot()
+        // The long-term memory log used to be saved and editable but never
+        // reached the model, so the companion could not remember anything across
+        // separate chats. It is injected here.
+        let memoryLog = memoryStore.getActiveMemoryLog()
 
         return SystemPromptTemplate.build(
             userName: nil,
             conversationContext: pastConversation,
             visionDescription: visionDescription,
-            characterName: characterName
+            characterName: characterName,
+            memoryLog: memoryLog
         )
     }
 }

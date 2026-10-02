@@ -46,7 +46,11 @@ final class VoiceManager: NSObject {
     }
 
     // MARK: - Private
-    private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+    /// Follows the app's language setting; recreated on each access so a
+    /// language change takes effect on the next listening session.
+    private var speechRecognizer: SFSpeechRecognizer? {
+        SFSpeechRecognizer(locale: HostedServiceConfig.speechRecognizerLocale())
+    }
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
     private let audioEngine = AVAudioEngine()

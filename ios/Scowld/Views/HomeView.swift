@@ -276,6 +276,7 @@ struct HomeView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .amicaSettingsChanged)) { _ in
             updateHandsFreeWakeListener()
+            runViewerScript(AmicaViewerBridge.applySceneScript())
         }
         .onChange(of: handsFreeModeEnabled) {
             updateHandsFreeWakeListener()
@@ -376,6 +377,8 @@ struct HomeView: View {
 
             handsFreeButton
 
+            characterActionsMenu
+
             messageField
 
             voiceButton
@@ -387,6 +390,60 @@ struct HomeView: View {
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity)
         .scowldComposerGlass()
+    }
+
+    // MARK: - Character actions
+
+    /// Manual triggers for the bundled body animations and VRM expressions.
+    /// Before the viewer bridge existed there was no way for the user to make the
+    /// character move on demand.
+    private var characterActionsMenu: some View {
+        Menu {
+            Section("Actions") {
+                ForEach(AmicaGesture.presets) { gesture in
+                    Button {
+                        runViewerScript(AmicaViewerBridge.playGestureScript(gesture.id))
+                    } label: {
+                        Label(gesture.title, systemImage: gesture.systemImage)
+                    }
+                }
+            }
+
+            Section("Expression") {
+                ForEach(AmicaExpression.allCases) { expression in
+                    Button {
+                        runViewerScript(AmicaViewerBridge.expressionScript(expression.rawValue))
+                    } label: {
+                        Label(expression.title, systemImage: expression.systemImage)
+                    }
+                }
+            }
+
+            Section {
+                Button {
+                    runViewerScript(AmicaViewerBridge.resetCameraScript)
+                } label: {
+                    Label("Reset camera", systemImage: "camera.metering.center.weighted")
+                }
+            }
+        } label: {
+            Image(systemName: "sparkles")
+                .font(.system(size: 22, weight: .semibold))
+                .frame(width: 40, height: 48)
+                .foregroundStyle(.secondary)
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .accessibilityLabel("Character actions")
+    }
+
+    /// Fire-and-forget Javascript into the 3D viewer.
+    private func runViewerScript(_ script: String) {
+        amicaCoordinator?.webView?.evaluateJavaScript(script) { _, error in
+            if let error {
+                DebugLog.shared.add("[Viewer] script failed: \(error.localizedDescription)")
+            }
+        }
     }
 
     private var recordingComposerBar: some View {
@@ -1150,6 +1207,24 @@ class AmicaLocalServer {
             return
         }
 
+        // MARK: - Doubao / MiniMax / Fish Audio TTS proxies
+        // The web app only knows one generic TTS slot. Each of these routes speaks
+        // its provider's real protocol and answers with raw audio bytes.
+        if path.hasPrefix("/api/doubao-tts/") {
+            handleCloudTTSProxy(client: client, method: method, backend: .doubao, body: requestBody)
+            return
+        }
+
+        if path.hasPrefix("/api/minimax-tts/") {
+            handleCloudTTSProxy(client: client, method: method, backend: .minimax, body: requestBody)
+            return
+        }
+
+        if path.hasPrefix("/api/fish-tts/") {
+            handleCloudTTSProxy(client: client, method: method, backend: .fishAudio, body: requestBody)
+            return
+        }
+
         // MARK: - CORS Preflight
         if method == "OPTIONS" {
             sendCORSPreflight(client: client)
@@ -1317,6 +1392,283 @@ class AmicaLocalServer {
         sendResponse(client: client, data: responseData, mimeType: responseMime, statusCode: responseCode)
     }
 
+    // MARK: - Doubao / MiniMax / Fish Audio proxies
+
+    /// Blocking URLSession call, matching the style of the other proxies: the local
+    /// server handles each client on its own background queue, so waiting here is safe.
+    private func performBlockingRequest(_ request: URLRequest) -> (data: Data, statusCode: Int, contentType: String) {
+        let semaphore = DispatchSemaphore(value: 0)
+        var responseData = Data()
+        var responseCode = 502
+        var responseMime = "application/octet-stream"
+
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+            if let httpResp = response as? HTTPURLResponse {
+                responseCode = httpResp.statusCode
+                responseMime = httpResp.value(forHTTPHeaderField: "Content-Type") ?? "application/octet-stream"
+            }
+            if let data, !data.isEmpty {
+                responseData = data
+            } else if error != nil {
+                responseCode = 502
+            }
+            semaphore.signal()
+        }
+        task.resume()
+        semaphore.wait()
+        return (responseData, responseCode, responseMime)
+    }
+
+    /// Shared entry point for the three extra TTS providers.
+    ///
+    /// The bundled page POSTs `{model, input, voice}` to
+    /// `<openai_tts_url>/v1/audio/speech` and expects raw audio bytes back. These
+    /// routes receive exactly that and translate it into the provider's own shape.
+    private func handleCloudTTSProxy(client: Int32, method: String, backend: TTSBackend, body: Data?) {
+        if method == "OPTIONS" {
+            sendCORSPreflight(client: client)
+            return
+        }
+
+        guard method == "POST" else {
+            sendResponse(client: client, data: Data("Method Not Allowed".utf8), mimeType: "text/plain", statusCode: 405)
+            return
+        }
+
+        guard let body,
+              let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+            sendResponse(client: client, data: Data("{\"error\":\"Invalid JSON body\"}".utf8), mimeType: "application/json", statusCode: 400)
+            return
+        }
+
+        let text = (json["input"] as? String) ?? ""
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            sendResponse(client: client, data: Data("{\"error\":\"Empty input\"}".utf8), mimeType: "application/json", statusCode: 400)
+            return
+        }
+
+        // The web page echoes back whatever we injected; fall back to the saved
+        // preferences so the request still works if the page sends nothing.
+        let model = ((json["model"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
+            ?? TTSBackend.selectedModel(for: backend)
+        let voice = ((json["voice"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
+            ?? TTSBackend.selectedVoice(for: backend)
+
+        guard let secret = KeychainManager.load(key: backend.keychainKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !secret.isEmpty else {
+            sendResponse(
+                client: client,
+                data: Data("{\"error\":\"No \(backend.displayName) API key saved\"}".utf8),
+                mimeType: "application/json",
+                statusCode: 401
+            )
+            return
+        }
+
+        let endpoint = TTSBackend.selectedEndpoint(for: backend)
+        logger.info("[Proxy] \(backend.displayName) TTS model=\(model) voice=\(voice) chars=\(text.count)")
+
+        switch backend {
+        case .doubao:
+            handleDoubaoRequest(client: client, endpoint: endpoint, secret: secret, cluster: model, voice: voice, text: text)
+        case .minimax:
+            handleMiniMaxRequest(client: client, endpoint: endpoint, secret: secret, model: model, voice: voice, text: text)
+        case .fishAudio:
+            handleFishAudioRequest(client: client, endpoint: endpoint, secret: secret, model: model, voice: voice, text: text)
+        default:
+            sendResponse(client: client, data: Data("{\"error\":\"Unsupported backend\"}".utf8), mimeType: "application/json", statusCode: 400)
+        }
+    }
+
+    /// Volcano Engine Doubao TTS. The Keychain value must be `appid:access_token`.
+    private func handleDoubaoRequest(client: Int32, endpoint: String, secret: String, cluster: String, voice: String, text: String) {
+        let parts = secret.split(separator: ":", maxSplits: 1).map(String.init)
+        guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else {
+            sendResponse(
+                client: client,
+                data: Data("{\"error\":\"Doubao credentials must be saved as appid:access_token\"}".utf8),
+                mimeType: "application/json",
+                statusCode: 401
+            )
+            return
+        }
+        let appID = parts[0]
+        let accessToken = parts[1]
+
+        guard let url = URL(string: endpoint) else {
+            sendResponse(client: client, data: Data("{\"error\":\"Bad endpoint\"}".utf8), mimeType: "application/json", statusCode: 400)
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // Volcano's docs require the literal "Bearer;" prefix — a semicolon, not a space.
+        request.setValue("Bearer;\(accessToken)", forHTTPHeaderField: "Authorization")
+
+        let payload: [String: Any] = [
+            "app": ["appid": appID, "token": accessToken, "cluster": cluster],
+            "user": ["uid": "scowld-ios"],
+            "audio": [
+                "voice_type": voice,
+                "encoding": "mp3",
+                "speed_ratio": 1.0,
+                "volume_ratio": 1.0,
+                "pitch_ratio": 1.0,
+            ],
+            "request": [
+                "reqid": UUID().uuidString,
+                "text": text,
+                "text_type": "plain",
+                "operation": "query",
+            ],
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+
+        let result = performBlockingRequest(request)
+        guard result.statusCode == 200 else {
+            logger.error("[Proxy] Doubao error \(result.statusCode)")
+            sendResponse(client: client, data: result.data, mimeType: "application/json", statusCode: result.statusCode)
+            return
+        }
+
+        // {"code":3000,"data":"<base64 mp3>"}
+        guard let json = try? JSONSerialization.jsonObject(with: result.data) as? [String: Any] else {
+            sendResponse(client: client, data: Data("{\"error\":\"Unreadable Doubao response\"}".utf8), mimeType: "application/json", statusCode: 502)
+            return
+        }
+        if let code = json["code"] as? Int, code != 3000 {
+            sendResponse(client: client, data: result.data, mimeType: "application/json", statusCode: 502)
+            return
+        }
+        guard let base64 = json["data"] as? String, let audio = Data(base64Encoded: base64) else {
+            sendResponse(client: client, data: Data("{\"error\":\"Doubao returned no audio\"}".utf8), mimeType: "application/json", statusCode: 502)
+            return
+        }
+
+        logger.info("[Proxy] Doubao ok: \(audio.count) bytes")
+        sendResponse(client: client, data: audio, mimeType: "audio/mpeg", statusCode: 200)
+    }
+
+    /// MiniMax T2A. Returns hex-encoded audio that we decode back to bytes.
+    private func handleMiniMaxRequest(client: Int32, endpoint: String, secret: String, model: String, voice: String, text: String) {
+        guard let url = URL(string: endpoint) else {
+            sendResponse(client: client, data: Data("{\"error\":\"Bad endpoint\"}".utf8), mimeType: "application/json", statusCode: 400)
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
+
+        let payload: [String: Any] = [
+            "model": model,
+            "text": text,
+            "stream": false,
+            "voice_setting": [
+                "voice_id": voice,
+                "speed": 1.0,
+                "vol": 1.0,
+                "pitch": 0,
+            ],
+            "audio_setting": [
+                "sample_rate": 32000,
+                "bitrate": 128000,
+                "format": "mp3",
+                "channel": 1,
+            ],
+            "output_format": "hex",
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+
+        let result = performBlockingRequest(request)
+        guard result.statusCode == 200 else {
+            logger.error("[Proxy] MiniMax error \(result.statusCode)")
+            sendResponse(client: client, data: result.data, mimeType: "application/json", statusCode: result.statusCode)
+            return
+        }
+
+        // {"data":{"audio":"<hex>"},"base_resp":{"status_code":0}}
+        guard let json = try? JSONSerialization.jsonObject(with: result.data) as? [String: Any] else {
+            sendResponse(client: client, data: Data("{\"error\":\"Unreadable MiniMax response\"}".utf8), mimeType: "application/json", statusCode: 502)
+            return
+        }
+        if let baseResp = json["base_resp"] as? [String: Any],
+           let statusCode = baseResp["status_code"] as? Int, statusCode != 0 {
+            logger.error("[Proxy] MiniMax status \(statusCode)")
+            sendResponse(client: client, data: result.data, mimeType: "application/json", statusCode: 502)
+            return
+        }
+        guard let dataObject = json["data"] as? [String: Any],
+              let hex = dataObject["audio"] as? String,
+              let audio = Self.dataFromHexString(hex) else {
+            sendResponse(client: client, data: Data("{\"error\":\"MiniMax returned no audio\"}".utf8), mimeType: "application/json", statusCode: 502)
+            return
+        }
+
+        logger.info("[Proxy] MiniMax ok: \(audio.count) bytes")
+        sendResponse(client: client, data: audio, mimeType: "audio/mpeg", statusCode: 200)
+    }
+
+    /// Fish Audio TTS. Returns raw audio bytes on success.
+    private func handleFishAudioRequest(client: Int32, endpoint: String, secret: String, model: String, voice: String, text: String) {
+        guard let url = URL(string: endpoint) else {
+            sendResponse(client: client, data: Data("{\"error\":\"Bad endpoint\"}".utf8), mimeType: "application/json", statusCode: 400)
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
+        request.setValue(model.isEmpty ? "s1" : model, forHTTPHeaderField: "model")
+
+        var payload: [String: Any] = [
+            "text": text,
+            "format": "mp3",
+            "mp3_bitrate": 128,
+            "chunk_length": 200,
+            "normalize": true,
+            "latency": "normal",
+        ]
+        // `reference_id` selects a cloned or preset voice; without one Fish uses its
+        // default voice, which is still a valid request.
+        if !voice.isEmpty {
+            payload["reference_id"] = voice
+        }
+        request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+
+        let result = performBlockingRequest(request)
+        guard result.statusCode == 200 else {
+            logger.error("[Proxy] Fish Audio error \(result.statusCode)")
+            sendResponse(client: client, data: result.data, mimeType: "application/json", statusCode: result.statusCode)
+            return
+        }
+        guard !result.data.isEmpty else {
+            sendResponse(client: client, data: Data("{\"error\":\"Fish Audio returned no audio\"}".utf8), mimeType: "application/json", statusCode: 502)
+            return
+        }
+
+        logger.info("[Proxy] Fish Audio ok: \(result.data.count) bytes")
+        sendResponse(client: client, data: result.data, mimeType: "audio/mpeg", statusCode: 200)
+    }
+
+    /// MiniMax hands audio back as a hex string rather than base64.
+    static func dataFromHexString(_ hex: String) -> Data? {
+        let cleaned = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty, cleaned.count % 2 == 0 else { return nil }
+        var data = Data(capacity: cleaned.count / 2)
+        var index = cleaned.startIndex
+        while index < cleaned.endIndex {
+            guard let next = cleaned.index(index, offsetBy: 2, limitedBy: cleaned.endIndex) else { return nil }
+            guard let byte = UInt8(cleaned[index..<next], radix: 16) else { return nil }
+            data.append(byte)
+            index = next
+        }
+        return data
+    }
+
     static func mimeType(for ext: String) -> String {
         switch ext.lowercased() {
         case "html": return "text/html; charset=utf-8"
@@ -1399,15 +1751,18 @@ struct AmicaFullView: UIViewRepresentable {
         // Inject native config before page loads
         let defaults = UserDefaults.standard
         HostedServiceConfig.applyBYOKDefaults()
-        let ttsBackend = defaults.string(forKey: "amica_tts_backend") ?? TTSBackend.elevenLabs.rawValue
+        let ttsBackendRaw = defaults.string(forKey: "amica_tts_backend") ?? TTSBackend.elevenLabs.rawValue
+        let ttsBackend = TTSBackend(rawValue: ttsBackendRaw) ?? .elevenLabs
+        let ttsWebBackend = ttsBackend.webBackendKey
+        let ttsProxyPath = ttsBackend.proxyPath
+        let ttsModel = TTSBackend.selectedModel(for: ttsBackend)
+        let ttsVoice = TTSBackend.selectedVoice(for: ttsBackend)
         let sttBackend = defaults.string(forKey: "amica_stt_backend") ?? STTBackend.nativeIOS.rawValue
         let visionEnabledJS = "true"
         let visionBackend = "native_ios"
         let elevenLabsVoiceId = HostedServiceConfig.selectedElevenLabsVoiceID()
         let elevenLabsModel = TTSBackend.selectedModel(for: .elevenLabs)
-        let openAITTSModel = TTSBackend.selectedModel(for: .openAI)
-        let openAITTSVoice = HostedServiceConfig.selectedOpenAITTSVoice()
-        let keychainSentinel = "stored_in_ios_keychain"
+        let keychainSentinel = TTSBackend.keychainSentinel
         let characterName = CharacterPack.resolveCharacterName()
         let selectedAvatar = defaults.string(forKey: "selected_avatar") ?? "AvatarSample_A"
 
@@ -1422,7 +1777,7 @@ struct AmicaFullView: UIViewRepresentable {
                     }
                 }
                 localStorage.setItem('chatvrm_tts_muted', 'false');
-                localStorage.setItem('chatvrm_tts_backend', '\(ttsBackend)');
+                localStorage.setItem('chatvrm_tts_backend', '\(ttsWebBackend)');
                 localStorage.setItem('chatvrm_elevenlabs_voiceid', '\(elevenLabsVoiceId)');
                 localStorage.setItem('chatvrm_elevenlabs_model', '\(elevenLabsModel)');
                 localStorage.setItem('chatvrm_rvc_enabled', 'false');
@@ -1431,7 +1786,7 @@ struct AmicaFullView: UIViewRepresentable {
             window.__nativeConfig = {
                 chatbot_backend: 'native_ios',
                 tts_muted: 'false',
-                tts_backend: '\(ttsBackend)',
+                tts_backend: '\(ttsWebBackend)',
                 stt_backend: '\(sttBackend)',
                 vision_backend: '\(visionBackend)',
                 elevenlabs_apikey: '\(keychainSentinel)',
@@ -1440,9 +1795,9 @@ struct AmicaFullView: UIViewRepresentable {
                 rvc_enabled: 'false',
                 amica_life_enabled: 'false',
                 openai_tts_apikey: '\(keychainSentinel)',
-                openai_tts_url: '/api/openai-tts',
-                openai_tts_model: '\(openAITTSModel)',
-                openai_tts_voice: '\(openAITTSVoice)',
+                openai_tts_url: '\(ttsProxyPath)',
+                openai_tts_model: '\(ttsModel)',
+                openai_tts_voice: '\(ttsVoice)',
                 name: '\(characterName)',
                 system_prompt: 'You are \(characterName), a warm, cheerful, and expressive AI companion.',
                 vrm_url: '/vrm/\(selectedAvatar).vrm'
@@ -1795,13 +2150,34 @@ struct AmicaFullView: UIViewRepresentable {
         )
         contentController.addUserScript(audioResumeScript)
 
+        // Viewer bridge: exposes gesture / expression / camera / background control.
+        // Must be registered before the scene script below, which uses its helpers.
+        contentController.addUserScript(WKUserScript(
+            source: AmicaViewerBridge.bootstrapScript,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
+
+        // Apply the saved background, subject offset and zoom range once the
+        // viewer exists (it is created asynchronously by the web app).
+        contentController.addUserScript(WKUserScript(
+            source: AmicaViewerBridge.initialSceneScript(),
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
+
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.isOpaque = false
         webView.backgroundColor = .black
         webView.underPageBackgroundColor = .black
         webView.allowsLinkPreview = false
         webView.scrollView.bounces = false
-        webView.scrollView.isScrollEnabled = true
+        // The 3D viewer implements its own pinch-zoom and pan through
+        // OrbitControls. WKWebView's built-in scroll/pinch recognizers would
+        // swallow those two-finger gestures, so both are turned off here and the
+        // touches are delivered to the page instead.
+        webView.scrollView.isScrollEnabled = false
+        webView.scrollView.pinchGestureRecognizer?.isEnabled = false
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
@@ -1887,13 +2263,16 @@ struct AmicaFullView: UIViewRepresentable {
         private func pushUpdatedConfig() {
             let defaults = UserDefaults.standard
             HostedServiceConfig.applyBYOKDefaults()
-            let ttsBackend = defaults.string(forKey: "amica_tts_backend") ?? TTSBackend.elevenLabs.rawValue
+            let ttsBackendRaw = defaults.string(forKey: "amica_tts_backend") ?? TTSBackend.elevenLabs.rawValue
+            let ttsBackend = TTSBackend(rawValue: ttsBackendRaw) ?? .elevenLabs
+            let ttsWebBackend = ttsBackend.webBackendKey
+            let ttsProxyPath = ttsBackend.proxyPath
+            let ttsModel = TTSBackend.selectedModel(for: ttsBackend)
+            let ttsVoice = TTSBackend.selectedVoice(for: ttsBackend)
             let sttBackend = defaults.string(forKey: "amica_stt_backend") ?? STTBackend.nativeIOS.rawValue
             let elevenLabsVoiceId = HostedServiceConfig.selectedElevenLabsVoiceID()
             let elevenLabsModel = TTSBackend.selectedModel(for: .elevenLabs)
-            let openAITTSModel = TTSBackend.selectedModel(for: .openAI)
-            let openAITTSVoice = HostedServiceConfig.selectedOpenAITTSVoice()
-            let keychainSentinel = "stored_in_ios_keychain"
+            let keychainSentinel = TTSBackend.keychainSentinel
             let visionEnabledJS = "true"
             let visionBackend = "native_ios"
             let characterName = CharacterPack.resolveCharacterName()
@@ -1902,7 +2281,7 @@ struct AmicaFullView: UIViewRepresentable {
             let js = """
                 try {
                     localStorage.setItem('chatvrm_tts_muted', 'false');
-                    localStorage.setItem('chatvrm_tts_backend', '\(ttsBackend)');
+                    localStorage.setItem('chatvrm_tts_backend', '\(ttsWebBackend)');
                     localStorage.setItem('chatvrm_elevenlabs_voiceid', '\(elevenLabsVoiceId)');
                     localStorage.setItem('chatvrm_elevenlabs_model', '\(elevenLabsModel)');
                     localStorage.setItem('chatvrm_rvc_enabled', 'false');
@@ -1911,7 +2290,7 @@ struct AmicaFullView: UIViewRepresentable {
                 window.__nativeConfig = {
                     chatbot_backend: 'native_ios',
                     tts_muted: 'false',
-                    tts_backend: '\(ttsBackend)',
+                    tts_backend: '\(ttsWebBackend)',
                     stt_backend: '\(sttBackend)',
                     vision_backend: '\(visionBackend)',
                     elevenlabs_apikey: '\(keychainSentinel)',
@@ -1920,9 +2299,9 @@ struct AmicaFullView: UIViewRepresentable {
                     rvc_enabled: 'false',
                     amica_life_enabled: 'false',
                     openai_tts_apikey: '\(keychainSentinel)',
-                    openai_tts_url: '/api/openai-tts',
-                    openai_tts_model: '\(openAITTSModel)',
-                    openai_tts_voice: '\(openAITTSVoice)',
+                    openai_tts_url: '\(ttsProxyPath)',
+                    openai_tts_model: '\(ttsModel)',
+                    openai_tts_voice: '\(ttsVoice)',
                     name: '\(characterName)',
                     system_prompt: 'You are \(characterName), a warm, cheerful, and expressive AI companion.',
                     vrm_url: '/vrm/\(selectedAvatar).vrm'
@@ -2295,7 +2674,7 @@ struct AmicaFullView: UIViewRepresentable {
                     provider: OllamaProvider(baseURL: baseURL, model: model),
                     supportsVision: provider.supportsVision
                 )
-            case .groq, .openRouter, .xai, .togetherAI, .huggingFace, .veniceAI, .moonshot:
+            case .groq, .openRouter, .xai, .togetherAI, .huggingFace, .veniceAI, .moonshot, .deepseek, .glm:
                 guard let baseURL = provider.baseURL else {
                     throw LLMError.invalidResponse
                 }

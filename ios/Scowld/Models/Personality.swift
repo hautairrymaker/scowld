@@ -139,7 +139,7 @@ enum SystemPromptTemplate {
         }
     }
 
-    static func build(userName: String?, conversationContext: [String], visionDescription: String?, characterName: String = "Bella") -> String {
+    static func build(userName: String?, conversationContext: [String], visionDescription: String?, characterName: String = "Bella", memoryLog: String? = nil) -> String {
         let customPrompt = UserDefaults.standard.string(forKey: "system_prompt") ?? ""
         let personality = customPrompt.isEmpty
             ? "You are \(characterName), a friendly and expressive AI assistant with an anime avatar. You are warm, curious, and genuinely care about helping. You speak naturally and conversationally. You're cheerful and engaging, with a playful personality."
@@ -170,6 +170,17 @@ enum SystemPromptTemplate {
                 prompt += "- \(message)\n"
             }
             prompt += "\n"
+        }
+
+        if let log = memoryLog?.trimmingCharacters(in: .whitespacesAndNewlines), !log.isEmpty {
+            prompt += """
+            Long-term memory — things you already know about this person.
+            These notes persist across every chat, including brand new ones.
+            Reference them naturally; never mention that you keep notes.
+
+            \(log)
+
+            """
         }
 
         prompt += "Current date/time: \(DateFormatter.localizedString(from: Date(), dateStyle: .full, timeStyle: .short))\n\n"

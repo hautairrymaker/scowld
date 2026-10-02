@@ -14,6 +14,8 @@ enum AIProvider: String, CaseIterable, Codable, Sendable {
     case huggingFace
     case veniceAI
     case moonshot
+    case deepseek
+    case glm
 
     var displayName: String {
         switch self {
@@ -28,6 +30,8 @@ enum AIProvider: String, CaseIterable, Codable, Sendable {
         case .huggingFace: "Hugging Face"
         case .veniceAI: "Venice AI"
         case .moonshot: "Moonshot AI"
+        case .deepseek: "DeepSeek"
+        case .glm: "Zhipu GLM"
         }
     }
 
@@ -135,6 +139,19 @@ enum AIProvider: String, CaseIterable, Codable, Sendable {
                 "moonshot-v1-32k",
                 "moonshot-v1-128k",
             ]
+        case .deepseek:
+            [
+                "deepseek-chat",
+                "deepseek-reasoner",
+            ]
+        case .glm:
+            [
+                "glm-4-plus",
+                "glm-4-air",
+                "glm-4-airx",
+                "glm-4-flash",
+                "glm-4-long",
+            ]
         }
     }
 
@@ -151,6 +168,8 @@ enum AIProvider: String, CaseIterable, Codable, Sendable {
         case .huggingFace: "openai/gpt-oss-20b:fireworks-ai"
         case .veniceAI: "qwen-3-6-plus"
         case .moonshot: "kimi-k2.6"
+        case .deepseek: "deepseek-chat"
+        case .glm: "glm-4-flash"
         }
     }
 
@@ -172,7 +191,7 @@ enum AIProvider: String, CaseIterable, Codable, Sendable {
         switch self {
         case .gemini, .openai, .claude, .openRouter, .xai, .togetherAI, .moonshot: true
         case .huggingFace: true // some models
-        case .ollama, .groq, .veniceAI: false
+        case .ollama, .groq, .veniceAI, .deepseek, .glm: false
         }
     }
 
@@ -186,6 +205,8 @@ enum AIProvider: String, CaseIterable, Codable, Sendable {
         case .huggingFace: "https://router.huggingface.co/v1"
         case .veniceAI: "https://api.venice.ai/api/v1"
         case .moonshot: "https://api.moonshot.ai/v1"
+        case .deepseek: "https://api.deepseek.com/v1"
+        case .glm: "https://open.bigmodel.cn/api/paas/v4"
         default: nil
         }
     }
@@ -216,17 +237,23 @@ enum OllamaConfig {
 enum TTSBackend: String, CaseIterable, Codable, Sendable {
     case elevenLabs = "elevenlabs"
     case openAI = "openai_tts"
+    case doubao = "doubao_tts"
+    case minimax = "minimax_tts"
+    case fishAudio = "fish_audio_tts"
 
     var displayName: String {
         switch self {
         case .elevenLabs: "ElevenLabs"
         case .openAI: "OpenAI"
+        case .doubao: "Doubao Voice"
+        case .minimax: "MiniMax"
+        case .fishAudio: "Fish Audio"
         }
     }
 
     var keychainKey: String {
         switch self {
-        case .elevenLabs: "com.scowld.tts.\(rawValue)"
+        case .elevenLabs, .doubao, .minimax, .fishAudio: "com.scowld.tts.\(rawValue)"
         // OpenAI TTS reuses the OpenAI chat provider key (one key for chat + speech).
         case .openAI: AIProvider.openai.keychainKey
         }
@@ -234,6 +261,16 @@ enum TTSBackend: String, CaseIterable, Codable, Sendable {
 
     var modelDefaultsKey: String {
         "com.scowld.tts.model.\(rawValue)"
+    }
+
+    /// Per-backend voice / speaker identifier.
+    var voiceDefaultsKey: String {
+        "com.scowld.tts.voice.\(rawValue)"
+    }
+
+    /// Per-backend API endpoint override.
+    var endpointDefaultsKey: String {
+        "com.scowld.tts.endpoint.\(rawValue)"
     }
 
     var availableModels: [String] {
@@ -251,6 +288,18 @@ enum TTSBackend: String, CaseIterable, Codable, Sendable {
                 "tts-1",
                 "tts-1-hd",
             ]
+        case .doubao:
+            // Volcano Engine "business cluster" values.
+            ["volcano_tts", "volcano_tts_concurr"]
+        case .minimax:
+            [
+                "speech-02-hd",
+                "speech-02-turbo",
+                "speech-01-hd",
+                "speech-01-turbo",
+            ]
+        case .fishAudio:
+            ["s1"]
         }
     }
 
@@ -258,6 +307,84 @@ enum TTSBackend: String, CaseIterable, Codable, Sendable {
         switch self {
         case .elevenLabs: HostedServiceConfig.defaultElevenLabsModel
         case .openAI: "gpt-4o-mini-tts"
+        case .doubao: "volcano_tts"
+        case .minimax: "speech-02-hd"
+        case .fishAudio: "s1"
+        }
+    }
+
+    var defaultVoice: String {
+        switch self {
+        case .elevenLabs: ""
+        case .openAI: HostedServiceConfig.defaultOpenAITTSVoice
+        case .doubao: "zh_female_qingxin"
+        case .minimax: "female-shaonv"
+        case .fishAudio: ""
+        }
+    }
+
+    /// Default upstream endpoint. Doubao / MiniMax / Fish Audio are reached only
+    /// through the native proxy, never straight from the page.
+    var defaultEndpoint: String {
+        switch self {
+        case .elevenLabs: ""
+        case .openAI: ""
+        case .doubao: "https://openspeech.bytedance.com/api/v1/tts"
+        case .minimax: "https://api.minimaxi.com/v1/t2a_v2"
+        case .fishAudio: "https://api.fish.audio/v1/tts"
+        }
+    }
+
+    /// Whether the backend needs a free-form voice identifier typed in by hand.
+    var usesCustomVoiceField: Bool {
+        switch self {
+        case .elevenLabs, .openAI: false
+        case .doubao, .minimax, .fishAudio: true
+        }
+    }
+
+    /// Whether the endpoint is user-editable (region / self-hosted deployments).
+    var usesEndpointField: Bool {
+        switch self {
+        case .elevenLabs, .openAI: false
+        case .doubao, .minimax, .fishAudio: true
+        }
+    }
+
+    /// The key the bundled web app understands. Everything that is not ElevenLabs
+    /// is routed through its generic OpenAI-compatible TTS slot, whose URL we point
+    /// at our own native proxy.
+    var webBackendKey: String {
+        switch self {
+        case .elevenLabs: "elevenlabs"
+        default: "openai_tts"
+        }
+    }
+
+    /// Path of the native proxy that speaks this provider's real protocol.
+    var proxyPath: String {
+        switch self {
+        case .openAI: "/api/openai-tts"
+        case .doubao: "/api/doubao-tts"
+        case .minimax: "/api/minimax-tts"
+        case .fishAudio: "/api/fish-tts"
+        case .elevenLabs: "/api/openai-tts"
+        }
+    }
+
+    /// Short explanation shown under the picker for the proxy-routed providers.
+    var providerHint: String {
+        switch self {
+        case .elevenLabs:
+            "Speaks through the app's local proxy, which keeps your key in the Keychain."
+        case .openAI:
+            "Speaks through the app's local proxy using your OpenAI key."
+        case .doubao:
+            "Routed by the app to Volcano Engine. Audio is synthesised on their servers."
+        case .minimax:
+            "Routed by the app to MiniMax. Audio is synthesised on their servers."
+        case .fishAudio:
+            "Routed by the app to Fish Audio. Audio is synthesised on their servers."
         }
     }
 
@@ -268,6 +395,7 @@ enum TTSBackend: String, CaseIterable, Codable, Sendable {
         case .elevenLabs: []
         case .openAI:
             ["alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse"]
+        case .doubao, .minimax, .fishAudio: []
         }
     }
 
@@ -279,4 +407,25 @@ enum TTSBackend: String, CaseIterable, Codable, Sendable {
         }
         return backend.defaultModel
     }
+
+    static func selectedVoice(for backend: TTSBackend) -> String {
+        // OpenAI keeps its voice in the pre-existing key so current installs keep
+        // whatever the user already picked.
+        if backend == .openAI {
+            return HostedServiceConfig.selectedOpenAITTSVoice()
+        }
+        let saved = UserDefaults.standard.string(forKey: backend.voiceDefaultsKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return saved.isEmpty ? backend.defaultVoice : saved
+    }
+
+    static func selectedEndpoint(for backend: TTSBackend) -> String {
+        let saved = UserDefaults.standard.string(forKey: backend.endpointDefaultsKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return saved.isEmpty ? backend.defaultEndpoint : saved
+    }
+
+    /// The token handed to the web page. The real secret never leaves the Keychain —
+    /// the native proxy reads it directly — so the page only needs a non-empty value.
+    static let keychainSentinel = "stored_in_ios_keychain"
 }

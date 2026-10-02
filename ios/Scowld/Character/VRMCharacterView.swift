@@ -104,7 +104,9 @@ struct AmicaWebView: UIViewRepresentable {
     func updateUIView(_ webView: WKWebView, context: Context) {
         guard context.coordinator.isReady else { return }
 
-        // Send gesture if pending
+        // Send gesture if pending. The previous implementation called
+        // `window.__amicaPlayAnimation`, which the bundled page never defined —
+        // the feature was silently dead. It now goes through the viewer bridge.
         if let gesture = pendingGesture {
             let animMap = [
                 "wave": "greeting", "greeting": "greeting",
@@ -113,8 +115,7 @@ struct AmicaWebView: UIViewRepresentable {
                 "spin": "spin", "squat": "squat"
             ]
             if let animName = animMap[gesture] {
-                let js = "window.__amicaPlayAnimation && window.__amicaPlayAnimation('\(animName)')"
-                webView.evaluateJavaScript(js)
+                webView.evaluateJavaScript(AmicaViewerBridge.playGestureScript(animName))
             }
             Task { @MainActor in pendingGesture = nil }
         }

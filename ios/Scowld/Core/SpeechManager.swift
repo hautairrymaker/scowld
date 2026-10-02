@@ -19,7 +19,11 @@ final class SpeechManager: NSObject {
     var speechPitch: Float = 1.1
 
     // MARK: - Private
-    private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+    /// Follows the app's language setting so non-English input works; recreated
+    /// on each access so a language change takes effect on the next session.
+    private var speechRecognizer: SFSpeechRecognizer? {
+        SFSpeechRecognizer(locale: HostedServiceConfig.speechRecognizerLocale())
+    }
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
     private let audioEngine = AVAudioEngine()
@@ -135,7 +139,8 @@ final class SpeechManager: NSObject {
         let utterance = AVSpeechUtterance(string: text)
         utterance.rate = speechRate
         utterance.pitchMultiplier = speechPitch
-        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+        utterance.voice = AVSpeechSynthesisVoice(language: HostedServiceConfig.speechRecognizerLocaleIdentifier())
+            ?? AVSpeechSynthesisVoice(language: "en-US")
         utterance.preUtteranceDelay = 0.1
 
         do {

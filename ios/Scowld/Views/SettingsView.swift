@@ -34,6 +34,8 @@ struct SettingsView: View {
     @State private var ttsAPIKey = ""
     @State private var hasSavedTTSAPIKey = false
     @State private var ttsSettingsMessage: String?
+    @State private var customTTSVoice = ""
+    @State private var ttsEndpoint = ""
 
     // MARK: - Secret visibility
     @State private var revealAIKey = false
@@ -47,6 +49,11 @@ struct SettingsView: View {
     @State private var systemPrompt: String = ""
     @State private var savedCharacterName: String = ""
     @State private var savedSystemPrompt: String = ""
+
+    // MARK: - Scene & Camera Settings
+    @State private var selectedBackgroundID: String = ""
+    @State private var subjectOffset: Double = 0
+    @State private var zoomMax: Double = AmicaViewerBridge.defaultZoomMax
 
     var showsDismissControls = true
 
@@ -214,6 +221,43 @@ struct SettingsView: View {
                                 title: "OpenAI voices use your OpenAI API key. There's no local preview.",
                                 systemImage: "info.circle"
                             )
+                        } else if selectedTTSBackend.usesCustomVoiceField {
+                            settingRow {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text("Voice ID")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    TextField(ttsVoicePlaceholder, text: $customTTSVoice)
+                                        .autocorrectionDisabled()
+                                        .textInputAutocapitalization(.never)
+                                }
+                            }
+
+                            if selectedTTSBackend.usesEndpointField {
+                                settingRow {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        Text("API endpoint")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                        TextField(selectedTTSBackend.defaultEndpoint, text: $ttsEndpoint)
+                                            .autocorrectionDisabled()
+                                            .textInputAutocapitalization(.never)
+                                            .font(.footnote.monospaced())
+                                    }
+                                }
+                            }
+
+                            if selectedTTSBackend == .doubao {
+                                settingsInfoRow(
+                                    title: "API key must be entered as appid:access_token — both from the Volcano Engine speech console.",
+                                    systemImage: "key.horizontal"
+                                )
+                            }
+
+                            settingsInfoRow(
+                                title: selectedTTSBackend.providerHint,
+                                systemImage: "antenna.radiowaves.left.and.right"
+                            )
                         }
 
                         glassSaveRow(status: ttsSettingsMessage ?? ttsSaveSubtitle) {
@@ -309,6 +353,8 @@ struct SettingsView: View {
                         .padding(.horizontal, 14)
                         .padding(.vertical, 12)
                     }
+
+                    sceneSection
 
                 }
                 .padding(20)
@@ -415,6 +461,92 @@ struct SettingsView: View {
                 saveSTTSettings()
             }
         }
+    }
+
+    // MARK: - Scene & camera
+
+    /// Placeholder for the free-form voice field, per provider.
+    private var ttsVoicePlaceholder: String {
+        switch selectedTTSBackend {
+        case .doubao: "zh_female_qingxin"
+        case .minimax: "female-shaonv"
+        case .fishAudio: "Reference ID from fish.audio"
+        default: "Voice ID"
+        }
+    }
+
+    private var sceneSection: some View {
+        settingsSection(
+            "Scene & Camera",
+            icon: "camera.viewfinder",
+            footer: "Backgrounds ship inside the app. Pinch the 3D view to zoom and drag to orbit; use the sparkles button on the home screen for actions and expressions."
+        ) {
+            settingRow {
+                Picker("Background", selection: $selectedBackgroundID) {
+                    Text("Default").tag("")
+                    ForEach(AmicaBackground.presets) { background in
+                        Text(background.title).tag(background.id)
+                    }
+                }
+                .pickerStyle(.menu)
+                .onChange(of: selectedBackgroundID) {
+                    guard !isLoadingSettings else { return }
+                    AmicaSceneSettings.setBackground(id: selectedBackgroundID)
+                    notifySceneChanged()
+                }
+            }
+
+            settingRow {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Character position")
+                        Spacer()
+                        Text(characterOffsetLabel)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                    Slider(value: $subjectOffset, in: -0.6...0.6, step: 0.05)
+                        .onChange(of: subjectOffset) {
+                            guard !isLoadingSettings else { return }
+                            AmicaSceneSettings.setSubjectOffset(subjectOffset)
+                            notifySceneChanged()
+                        }
+                }
+            }
+
+            settingRow {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Maximum zoom out")
+                        Spacer()
+                        Text(String(format: "%.1f×", zoomMax))
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                    Slider(value: $zoomMax, in: 2...12, step: 0.5)
+                        .onChange(of: zoomMax) {
+                            guard !isLoadingSettings else { return }
+                            AmicaSceneSettings.setZoomMax(zoomMax)
+                            notifySceneChanged()
+                        }
+                }
+            }
+
+            settingsInfoRow(
+                title: "Move the slider right to push the character towards the right of the screen — useful for making room for other panels.",
+                systemImage: "arrow.left.and.right"
+            )
+        }
+    }
+
+    private var characterOffsetLabel: String {
+        if abs(subjectOffset) < 0.001 { return "Centred" }
+        return String(format: "%@ %.2f", subjectOffset > 0 ? "Right" : "Left", abs(subjectOffset))
+    }
+
+    /// Pushes scene changes to the running 3D viewer.
+    private func notifySceneChanged() {
+        NotificationCenter.default.post(name: .amicaSettingsChanged, object: nil)
     }
 
     /// API-key entry with an eye toggle to reveal/hide the secret.
@@ -796,6 +928,10 @@ struct SettingsView: View {
         savedSystemPrompt = systemPrompt
         showAICaption = defaults.bool(forKey: "show_ai_caption")
 
+        selectedBackgroundID = AmicaSceneSettings.backgroundID(defaults: defaults)
+        subjectOffset = AmicaSceneSettings.subjectOffset(defaults: defaults)
+        zoomMax = AmicaSceneSettings.zoomMax(defaults: defaults)
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             isLoadingSettings = false
             hasCharacterChanges = false
@@ -832,6 +968,8 @@ struct SettingsView: View {
         ttsAPIKey = KeychainManager.load(key: backend.keychainKey) ?? ""
         hasSavedTTSAPIKey = !ttsAPIKey.isEmpty
         selectedOpenAITTSVoice = HostedServiceConfig.selectedOpenAITTSVoice()
+        customTTSVoice = TTSBackend.selectedVoice(for: backend)
+        ttsEndpoint = TTSBackend.selectedEndpoint(for: backend)
         if resetMessage {
             ttsSettingsMessage = nil
         }
@@ -889,6 +1027,15 @@ struct SettingsView: View {
             saveSelectedVoice()
         } else if backend == .openAI {
             saveOpenAITTSVoice()
+        } else if backend.usesCustomVoiceField {
+            defaults.set(
+                customTTSVoice.trimmingCharacters(in: .whitespacesAndNewlines),
+                forKey: backend.voiceDefaultsKey
+            )
+            defaults.set(
+                ttsEndpoint.trimmingCharacters(in: .whitespacesAndNewlines),
+                forKey: backend.endpointDefaultsKey
+            )
         }
         saveKeyIfNeeded(ttsAPIKey, key: backend.keychainKey)
 

@@ -10,7 +10,11 @@ final class HandsFreeWakeListener: NSObject {
     var isRunning = false
     var heardText = ""
 
-    private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+    /// Follows the app's language setting so the wake phrase works in any
+    /// supported language, not just English.
+    private var speechRecognizer: SFSpeechRecognizer? {
+        SFSpeechRecognizer(locale: HostedServiceConfig.speechRecognizerLocale())
+    }
     private let audioEngine = AVAudioEngine()
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?

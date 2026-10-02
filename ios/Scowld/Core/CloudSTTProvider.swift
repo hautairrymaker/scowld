@@ -13,6 +13,7 @@ enum STTBackend: String, CaseIterable {
     case deepgram = "deepgram"
     case assemblyAI = "assemblyai"
     case googleCloud = "google_cloud_stt"
+    case doubao = "doubao"
     case whisperBrowser = "whisper_browser"
     case none = "none"
 
@@ -24,6 +25,7 @@ enum STTBackend: String, CaseIterable {
         case .deepgram: "Deepgram"
         case .assemblyAI: "AssemblyAI"
         case .googleCloud: "Google Cloud STT"
+        case .doubao: "Doubao Voice (Volcano)"
         case .whisperBrowser: "Amica (Browser Whisper)"
         case .none: "None (text input only)"
         }
@@ -56,6 +58,9 @@ enum STTBackend: String, CaseIterable {
             ["universal-3-pro", "universal-2", "slam-1", "best"]
         case .googleCloud:
             ["latest_short", "latest_long", "telephony_short", "telephony", "command_and_search", "default"]
+        case .doubao:
+            // These are Volcano Engine "Resource ID" values, not model names.
+            ["volc.bigasr.auc_turbo", "volc.bigasr.auc"]
         default:
             []
         }
@@ -68,6 +73,7 @@ enum STTBackend: String, CaseIterable {
         case .deepgram: "nova-3"
         case .assemblyAI: "universal-3-pro"
         case .googleCloud: "latest_short"
+        case .doubao: "volc.bigasr.auc_turbo"
         default: ""
         }
     }
@@ -82,7 +88,7 @@ enum STTBackend: String, CaseIterable {
 
     var isCloudBased: Bool {
         switch self {
-        case .openaiWhisper, .groqWhisper, .deepgram, .assemblyAI, .googleCloud: true
+        case .openaiWhisper, .groqWhisper, .deepgram, .assemblyAI, .googleCloud, .doubao: true
         default: false
         }
     }
@@ -95,6 +101,7 @@ enum STTBackend: String, CaseIterable {
         case .deepgram: "Deepgram Nova speech models."
         case .assemblyAI: "AssemblyAI Universal and Slam speech models."
         case .googleCloud: "Google Cloud Speech-to-Text models."
+        case .doubao: "Volcano Engine Doubao ASR. Paste your API Key from the Doubao Speech console; the Model field selects the Resource ID."
         case .whisperBrowser: "Runs Whisper locally in the browser. Free, on-device."
         case .none: "Voice input disabled. Use text input only."
         }
@@ -124,6 +131,8 @@ enum CloudSTTManager {
             return try await transcribeAssemblyAI(audioData: audioData, apiKey: apiKey, model: model)
         case .googleCloud:
             return try await transcribeGoogle(audioData: audioData, apiKey: apiKey, model: model)
+        case .doubao:
+            return try await transcribeDoubao(audioData: audioData, apiKey: apiKey, model: model)
         default:
             throw CloudSTTError.unsupportedBackend
         }
@@ -260,7 +269,8 @@ enum CloudSTTManager {
             "config": [
                 "encoding": "LINEAR16",
                 "sampleRateHertz": 16000,
-                "languageCode": "en-US",
+                // Was hardcoded to "en-US"; follow the app's language setting instead.
+                "languageCode": HostedServiceConfig.speechRecognizerLocaleIdentifier(),
                 "model": model,
             ],
             "audio": [
@@ -285,6 +295,93 @@ enum CloudSTTManager {
             return ""
         }
         return transcript
+    }
+
+    // MARK: - Doubao (Volcano Engine) ASR
+
+    /// Volcano Engine "Doubao ASR - fast recorded-file recognition" endpoint.
+    /// Auth uses `X-Api-Key`; `X-Api-Resource-Id` comes from the Model field in Settings.
+    private static func transcribeDoubao(audioData: Data, apiKey: String, model: String) async throws -> String {
+        let url = URL(string: "https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(apiKey, forHTTPHeaderField: "X-Api-Key")
+        request.setValue(model.isEmpty ? "volc.bigasr.auc_turbo" : model, forHTTPHeaderField: "X-Api-Resource-Id")
+        request.setValue(UUID().uuidString, forHTTPHeaderField: "X-Api-Request-Id")
+        request.setValue("-1", forHTTPHeaderField: "X-Api-Sequence")
+
+        // Audio is sent as base64 inside the JSON body.
+        var audio: [String: Any] = [
+            "format": "wav",
+            "codec": "raw",
+            "rate": 16000,
+            "bits": 16,
+            "channel": 1,
+            "data": audioData.base64EncodedString(),
+        ]
+        if let doubaoLanguage = doubaoLanguageCode() {
+            audio["language"] = doubaoLanguage
+        }
+
+        let body: [String: Any] = [
+            "user": ["uid": "scowld-ios"],
+            "audio": audio,
+            "request": ["model_name": "bigmodel"],
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw CloudSTTError.apiError(doubaoErrorMessage(from: data))
+        }
+
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw CloudSTTError.parseError
+        }
+
+        if let header = json["header"] as? [String: Any] {
+            let code = (header["code"] as? Int) ?? (Int(header["code"] as? String ?? "0") ?? 0)
+            if code != 0, code != 20000000 {
+                throw CloudSTTError.apiError(doubaoErrorMessage(from: data))
+            }
+        }
+
+        if let result = json["result"] as? [String: Any], let text = result["text"] as? String {
+            return text
+        }
+        if let results = json["result"] as? [[String: Any]] {
+            return results.compactMap { $0["text"] as? String }.joined()
+        }
+        // A successful response with no speech returns no result payload.
+        return ""
+    }
+
+    /// Maps the app's short language code to the codes Doubao ASR expects.
+    private static func doubaoLanguageCode() -> String? {
+        guard let code = HostedServiceConfig.selectedServiceLanguageCode() else { return nil }
+        switch code {
+        case "zh": return "zh-CN"
+        case "zh-TW": return "zh-CN"
+        case "en": return "en-US"
+        case "ja": return "ja-JP"
+        case "ko": return "ko-KR"
+        case "fr": return "fr-FR"
+        case "es": return "es-MX"
+        case "pt": return "pt-BR"
+        case "id": return "id-ID"
+        default: return nil
+        }
+    }
+
+    private static func doubaoErrorMessage(from data: Data) -> String {
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let header = json["header"] as? [String: Any] {
+            let code = header["code"].map { "\($0)" } ?? "?"
+            let message = header["message"] as? String ?? "Unknown error"
+            return "[\(code)] \(message)"
+        }
+        return providerErrorMessage(from: data)
     }
 
     // MARK: - Helpers

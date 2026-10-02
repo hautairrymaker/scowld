@@ -1,4 +1,5 @@
 import Foundation
+import Speech
 
 // MARK: - Local Provider Configuration
 
@@ -275,5 +276,86 @@ enum ScowldVoiceLibrary {
 
     static func option(for voiceID: String) -> ScowldVoiceOption? {
         presetVoices.first { $0.voiceID == voiceID }
+    }
+}
+
+// MARK: - On-device speech locale
+
+extension HostedServiceConfig {
+    /// Locale used by Apple's on-device speech recognition (and by the local
+    /// speech-synthesis fallback). Follows the app's language setting and falls
+    /// back to the device language when the setting is "auto" or "device".
+    ///
+    /// Previously these call sites were hardcoded to `en-US`, which made voice
+    /// input unusable in every other language.
+    static func speechRecognizerLocale() -> Locale {
+        Locale(identifier: speechRecognizerLocaleIdentifier())
+    }
+
+    static func speechRecognizerLocaleIdentifier() -> String {
+        let selected = selectedServiceLanguageID()
+        if selected != autoLanguageID,
+           selected != deviceLanguageID,
+           let code = ScowldLanguageLibrary.option(for: selected)?.code {
+            return supportedSpeechLocale(matching: speechLocaleIdentifier(forShortCode: code))
+        }
+        return supportedSpeechLocale(matching: deviceLocaleIdentifier())
+    }
+
+    /// Maps the app's short language codes (see `ScowldLanguageLibrary`) onto the
+    /// locale identifiers the Speech framework expects.
+    private static func speechLocaleIdentifier(forShortCode code: String) -> String {
+        switch code {
+        case "ar": return "ar-SA"
+        case "zh": return "zh-CN"
+        case "zh-TW": return "zh-TW"
+        case "nl": return "nl-NL"
+        case "en": return "en-US"
+        case "tl": return "fil-PH"
+        case "fr": return "fr-FR"
+        case "de": return "de-DE"
+        case "hi": return "hi-IN"
+        case "id": return "id-ID"
+        case "it": return "it-IT"
+        case "ja": return "ja-JP"
+        case "ko": return "ko-KR"
+        case "pl": return "pl-PL"
+        case "pt": return "pt-BR"
+        case "ru": return "ru-RU"
+        case "es": return "es-ES"
+        case "sv": return "sv-SE"
+        case "th": return "th-TH"
+        case "tr": return "tr-TR"
+        case "uk": return "uk-UA"
+        case "vi": return "vi-VN"
+        default: return "en-US"
+        }
+    }
+
+    private static func deviceLocaleIdentifier() -> String {
+        guard let preferred = Locale.preferredLanguages.first else { return "en-US" }
+        return preferred.replacingOccurrences(of: "_", with: "-")
+    }
+
+    /// Snap an identifier onto one Speech actually supports, so an unsupported
+    /// device language degrades gracefully instead of failing outright.
+    private static func supportedSpeechLocale(matching identifier: String) -> String {
+        let supported = SFSpeechRecognizer.supportedLocales()
+        if let exact = supported.first(where: {
+            $0.identifier.caseInsensitiveCompare(identifier) == .orderedSame
+        }) {
+            return exact.identifier
+        }
+        let language = identifier
+            .split(separator: "-")
+            .first
+            .map { String($0).lowercased() } ?? ""
+        if !language.isEmpty,
+           let partial = supported.first(where: {
+               $0.languageCode?.identifier.lowercased() == language
+           }) {
+            return partial.identifier
+        }
+        return "en-US"
     }
 }
