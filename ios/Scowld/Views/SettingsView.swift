@@ -1,6 +1,8 @@
 import SwiftUI
 import AVFoundation
 import UIKit
+import PhotosUI
+import UniformTypeIdentifiers
 
 // MARK: - Settings View
 
@@ -54,6 +56,14 @@ struct SettingsView: View {
     @State private var selectedBackgroundID: String = ""
     @State private var subjectOffset: Double = 0
     @State private var zoomMax: Double = AmicaViewerBridge.defaultZoomMax
+
+    // MARK: - User media (backgrounds / avatars)
+    @State private var backgroundPhotoItem: PhotosPickerItem?
+    @State private var isPickingBackgroundPhoto = false
+    @State private var importedAvatars: [AmicaImportedAvatar] = []
+    @State private var isImportingAvatar = false
+    @State private var mediaMessage: String?
+    @State private var mediaMessageIsError = false
 
     var showsDismissControls = true
 
@@ -275,12 +285,60 @@ struct SettingsView: View {
                                 ForEach(CharacterPack.defaultPacks) { pack in
                                     Text(pack.displayName).tag(pack.fileName)
                                 }
+                                ForEach(importedAvatars) { avatar in
+                                    Text("\(avatar.displayName) (imported)").tag(avatar.publicPath)
+                                }
                             }
                             .pickerStyle(.menu)
                             .onChange(of: selectedAvatar) {
                                 guard !isLoadingSettings else { return }
                                 saveAvatarSettings()
                             }
+                        }
+
+                        settingsActionRow(
+                            title: "Import a VRM model",
+                            subtitle: "Use your own character from a .vrm file",
+                            systemImage: "square.and.arrow.down"
+                        ) {
+                            isImportingAvatar = true
+                        }
+
+                        ForEach(importedAvatars) { avatar in
+                            settingRow {
+                                HStack(spacing: 10) {
+                                    Image(systemName: "person.crop.square")
+                                        .font(.system(size: 18))
+                                        .foregroundStyle(.secondary)
+
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(avatar.displayName)
+                                            .lineLimit(1)
+                                        Text(avatar.sizeLabel)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+
+                                    Spacer()
+
+                                    Button {
+                                        deleteImportedAvatar(avatar)
+                                    } label: {
+                                        Image(systemName: "trash")
+                                            .foregroundStyle(.red)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityLabel("Delete \(avatar.displayName)")
+                                }
+                            }
+                        }
+
+                        if let mediaMessage {
+                            settingsInfoRow(
+                                title: mediaMessage,
+                                systemImage: mediaMessageIsError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill",
+                                color: mediaMessageIsError ? .red : .secondary
+                            )
                         }
 
                         settingRow {
@@ -361,6 +419,21 @@ struct SettingsView: View {
                 .padding(.bottom, 96)
             }
             .background(Color.black.ignoresSafeArea())
+            .photosPicker(
+                isPresented: $isPickingBackgroundPhoto,
+                selection: $backgroundPhotoItem,
+                matching: .images
+            )
+            .fileImporter(
+                isPresented: $isImportingAvatar,
+                allowedContentTypes: [UTType(filenameExtension: "vrm") ?? .data],
+                allowsMultipleSelection: false
+            ) { result in
+                handleAvatarImport(result)
+            }
+            .onChange(of: backgroundPhotoItem) {
+                handleBackgroundPhoto()
+            }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .background(KeyboardDismissInstaller())
@@ -483,9 +556,12 @@ struct SettingsView: View {
         ) {
             settingRow {
                 Picker("Background", selection: $selectedBackgroundID) {
-                    Text("Default").tag("")
+                    Text(AmicaBackground.defaultPreset.title).tag("")
                     ForEach(AmicaBackground.presets) { background in
                         Text(background.title).tag(background.id)
+                    }
+                    if selectedBackgroundID.hasPrefix("/") {
+                        Text("Your photo").tag(selectedBackgroundID)
                     }
                 }
                 .pickerStyle(.menu)
@@ -494,6 +570,14 @@ struct SettingsView: View {
                     AmicaSceneSettings.setBackground(id: selectedBackgroundID)
                     notifySceneChanged()
                 }
+            }
+
+            settingsActionRow(
+                title: "Choose a photo…",
+                subtitle: "Use any image from your photo library",
+                systemImage: "photo.on.rectangle"
+            ) {
+                isPickingBackgroundPhoto = true
             }
 
             settingRow {
@@ -547,6 +631,65 @@ struct SettingsView: View {
     /// Pushes scene changes to the running 3D viewer.
     private func notifySceneChanged() {
         NotificationCenter.default.post(name: .amicaSettingsChanged, object: nil)
+    }
+
+    // MARK: - User media
+
+    private func reloadImportedAvatars() {
+        importedAvatars = AmicaUserMedia.importedAvatars()
+    }
+
+    private func handleAvatarImport(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let source = urls.first else { return }
+            if let publicPath = AmicaUserMedia.importAvatar(from: source) {
+                reloadImportedAvatars()
+                selectedAvatar = publicPath
+                saveAvatarSettings()
+                showMediaMessage("Imported \(source.lastPathComponent)", isError: false)
+            } else {
+                showMediaMessage("Could not import that file", isError: true)
+            }
+        case .failure(let error):
+            showMediaMessage("Import failed: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    private func deleteImportedAvatar(_ avatar: AmicaImportedAvatar) {
+        AmicaUserMedia.deleteAvatar(fileName: avatar.fileName)
+        if selectedAvatar == avatar.publicPath {
+            selectedAvatar = CharacterPack.defaultPacks[0].fileName
+            saveAvatarSettings()
+        }
+        reloadImportedAvatars()
+        showMediaMessage("Deleted \(avatar.displayName)", isError: false)
+    }
+
+    private func handleBackgroundPhoto() {
+        guard let item = backgroundPhotoItem else { return }
+        backgroundPhotoItem = nil
+        Task { @MainActor in
+            do {
+                guard let data = try await item.loadTransferable(type: Data.self),
+                      let image = UIImage(data: data),
+                      let publicPath = AmicaUserMedia.saveBackgroundImage(image) else {
+                    showMediaMessage("Could not read that photo", isError: true)
+                    return
+                }
+                selectedBackgroundID = publicPath
+                AmicaSceneSettings.setBackground(id: publicPath)
+                notifySceneChanged()
+                showMediaMessage("Background updated", isError: false)
+            } catch {
+                showMediaMessage("Could not read that photo", isError: true)
+            }
+        }
+    }
+
+    private func showMediaMessage(_ text: String, isError: Bool) {
+        mediaMessage = text
+        mediaMessageIsError = isError
     }
 
     /// API-key entry with an eye toggle to reveal/hide the secret.
@@ -937,6 +1080,7 @@ struct SettingsView: View {
         selectedBackgroundID = AmicaSceneSettings.backgroundID(defaults: defaults)
         subjectOffset = AmicaSceneSettings.subjectOffset(defaults: defaults)
         zoomMax = AmicaSceneSettings.zoomMax(defaults: defaults)
+        reloadImportedAvatars()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             isLoadingSettings = false

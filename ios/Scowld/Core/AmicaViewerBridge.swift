@@ -66,6 +66,25 @@ enum AmicaViewerBridge {
             });
         };
 
+        // Swaps the character model at runtime, without reloading the page.
+        window.__scowldLoadAvatar = function(url, name) {
+            return new Promise(function(resolve) {
+                try {
+                    var v = window.__viewer;
+                    if (!v || typeof v.loadVrm !== 'function' || !url) { resolve(false); return; }
+                    v.loadVrm(url, name || 'avatar')
+                        .then(function() { resolve(true); })
+                        .catch(function(e) {
+                            console.error('[Scowld] loadVrm failed: ' + e);
+                            resolve(false);
+                        });
+                } catch (e) {
+                    console.error('[Scowld] loadVrm threw: ' + e);
+                    resolve(false);
+                }
+            });
+        };
+
         window.__scowldSetExpression = function(name) {
             try {
                 var v = viewer();
@@ -116,6 +135,7 @@ enum AmicaViewerBridge {
 
         window.__scowldSetBackground = function(imageURL, colour) {
             try {
+                window.__scowldDesiredBackground = imageURL || null;
                 if (imageURL) {
                     document.body.style.backgroundImage = 'url("' + imageURL + '")';
                     document.body.style.backgroundColor = '';
@@ -128,6 +148,55 @@ enum AmicaViewerBridge {
                 }
                 return true;
             } catch (e) { return false; }
+        };
+
+        // The web app applies its own background once on mount, straight from the
+        // config it was handed. That can land after our first attempt, which is why
+        // picking an image used to leave a black screen. The choice is now
+        // re-asserted — but only when it has actually drifted, so this never fights
+        // the page and costs nothing while everything is in sync.
+        window.__scowldEnforceBackground = function() {
+            var want = window.__scowldDesiredBackground;
+            if (!want) return;
+            try {
+                var desired = 'url("' + want + '")';
+                if (document.body.style.backgroundImage !== desired) {
+                    document.body.style.backgroundImage = desired;
+                    document.body.style.backgroundColor = '';
+                }
+            } catch (e) {}
+        };
+
+        // Guard against the eyes latching shut. The bundled AutoBlink stops being
+        // updated whenever an emotion disables it, so if that happens mid-blink the
+        // "blink" weight can stay at 1 — which looks like the character closing its
+        // eyes the moment it starts talking. Eyes held shut for two consecutive
+        // checks are forced back open, which leaves normal blinking alone.
+        window.__scowldBlinkGuard = function() {
+            try {
+                var v = window.__viewer;
+                var emote = v && v.model && v.model.emoteController;
+                if (!emote || !emote._expressionManager) return;
+                var manager = emote._expressionManager;
+                var expression = (typeof manager.getExpression === 'function')
+                    ? manager.getExpression('blink')
+                    : null;
+                var weight = expression ? expression.weight : 0;
+                if (weight >= 0.8) {
+                    window.__scowldBlinkStuck = (window.__scowldBlinkStuck || 0) + 1;
+                    if (window.__scowldBlinkStuck >= 2) {
+                        manager.setValue('blink', 0);
+                        if (emote._autoBlink) {
+                            emote._autoBlink._isOpen = true;
+                            emote._autoBlink._remainingTime = 5;
+                            emote._autoBlink.setEnable(true);
+                        }
+                        window.__scowldBlinkStuck = 0;
+                    }
+                } else {
+                    window.__scowldBlinkStuck = 0;
+                }
+            } catch (e) {}
         };
 
         // Scene state pushed down from the app. Kept in one object so a refresh
@@ -147,16 +216,28 @@ enum AmicaViewerBridge {
             }
         };
 
-        // The viewer is created asynchronously and the canvas is swapped while
-        // the VRM loads, so re-apply whenever a canvas (re)appears.
         window.__scowldReapplyScene = function() {
             window.__scowldApplyScene();
         };
+
+        // The viewer is created asynchronously and the canvas is swapped while the
+        // VRM loads, so re-apply whenever a canvas (re)appears.
         try {
             var observer = new MutationObserver(function() {
                 if (document.querySelector('canvas')) window.__scowldReapplyScene();
             });
             observer.observe(document.documentElement, { childList: true, subtree: true });
+        } catch (e) {}
+
+        // Low-frequency watchdogs: keep the chosen background in place and make
+        // sure the eyes never stay shut. Both are no-ops when nothing is wrong.
+        try {
+            setInterval(function() {
+                window.__scowldEnforceBackground();
+            }, 1500);
+            setInterval(function() {
+                window.__scowldBlinkGuard();
+            }, 700);
         } catch (e) {}
     })();
     """
@@ -175,13 +256,18 @@ enum AmicaViewerBridge {
 
     static let resetCameraScript = "window.__scowldResetCamera && window.__scowldResetCamera()"
 
+    /// Swaps the character model at runtime — used after importing a VRM, so the
+    /// page does not have to reload.
+    static func loadAvatarScript(url: String, name: String) -> String {
+        "window.__scowldLoadAvatar && window.__scowldLoadAvatar('\(escaped(url))', '\(escaped(name))')"
+    }
+
     /// Pushes the current scene preferences into the page and applies them once.
     /// Safe to call repeatedly, e.g. while dragging a slider in Settings.
     static func applySceneScript(defaults: UserDefaults = .standard) -> String {
-        let background = AmicaSceneSettings.background(defaults: defaults)
         let offset = AmicaSceneSettings.subjectOffset(defaults: defaults)
         let zoomMax = AmicaSceneSettings.zoomMax(defaults: defaults)
-        let imageLiteral = background.map { "'\(escaped($0.imageURL))'" } ?? "null"
+        let imageLiteral = "'\(escaped(AmicaSceneSettings.backgroundURL(defaults: defaults)))'"
 
         return """
         (function() {
@@ -240,6 +326,23 @@ enum AmicaSceneSettings {
         AmicaBackground.preset(id: backgroundID(defaults: defaults))
     }
 
+    /// Full URL for whatever the user chose — a bundled preset or a photo they
+    /// imported. Falls back to a real image rather than an empty string, because
+    /// handing the page an empty `bg_url` is what produced the black screen.
+    static func backgroundURL(defaults: UserDefaults = .standard) -> String {
+        let stored = backgroundID(defaults: defaults)
+        if stored.hasPrefix("/") { return stored }
+        if let preset = AmicaBackground.preset(id: stored) { return preset.imageURL }
+        return AmicaBackground.defaultPreset.imageURL
+    }
+
+    /// Label for the settings picker.
+    static func backgroundTitle(defaults: UserDefaults = .standard) -> String {
+        let stored = backgroundID(defaults: defaults)
+        if stored.hasPrefix("/") { return "Your photo" }
+        return AmicaBackground.preset(id: stored)?.title ?? "Default"
+    }
+
     static func subjectOffset(defaults: UserDefaults = .standard) -> Double {
         guard defaults.object(forKey: AmicaViewerBridge.DefaultsKey.subjectOffset) != nil else {
             return 0
@@ -293,6 +396,11 @@ struct AmicaBackground: Identifiable, Hashable {
     static func preset(id: String) -> AmicaBackground? {
         presets.first { $0.id == id }
     }
+
+    /// Shown when the user has not chosen anything. Handing the page an empty
+    /// background URL is what made the scene render black, so there is always a
+    /// real image behind the character.
+    static let defaultPreset = AmicaBackground(id: "bg-room1", title: "Cozy Room")
 }
 
 // MARK: - Bundled gestures

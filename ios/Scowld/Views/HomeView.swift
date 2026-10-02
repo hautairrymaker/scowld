@@ -142,6 +142,9 @@ struct HomeView: View {
     var isActive = true
     @State private var messageText = ""
     @State private var amicaCoordinator: AmicaFullView.Coordinator?
+    /// Avatar value the page is currently showing, so a change can be swapped in
+    /// at runtime instead of reloading the whole web view.
+    @State private var appliedAvatarValue: String?
     @State private var cameraOn = true
     @State private var voiceManager = VoiceManager()
     @State private var handsFreeWakeListener = HandsFreeWakeListener()
@@ -174,6 +177,8 @@ struct HomeView: View {
                 AmicaFullView(memoryStore: memoryStore, onCoordinatorReady: { coord in
                     amicaCoordinator = coord
                     coord.setRuntimeActive(isActive)
+                    // The page already loaded with this avatar, so remember it.
+                    appliedAvatarValue = UserDefaults.standard.string(forKey: "selected_avatar") ?? "AvatarSample_A"
                 })
                 .ignoresSafeArea()
 
@@ -276,6 +281,7 @@ struct HomeView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .amicaSettingsChanged)) { _ in
             updateHandsFreeWakeListener()
+            applyAvatarIfChanged()
             runViewerScript(AmicaViewerBridge.applySceneScript())
         }
         .onChange(of: handsFreeModeEnabled) {
@@ -446,6 +452,17 @@ struct HomeView: View {
         }
     }
 
+    /// Swaps the character model when the avatar selection changed. This runs
+    /// without reloading the page, so an imported model appears immediately.
+    private func applyAvatarIfChanged() {
+        let stored = UserDefaults.standard.string(forKey: "selected_avatar") ?? "AvatarSample_A"
+        guard stored != appliedAvatarValue else { return }
+        appliedAvatarValue = stored
+        runViewerScript(AmicaViewerBridge.loadAvatarScript(
+            url: AmicaAvatarSelection.vrmURL(for: stored),
+            name: AmicaAvatarSelection.displayName(for: stored, characterName: "")
+        ))
+    }
     private var recordingComposerBar: some View {
         HStack(spacing: 10) {
             Button {
@@ -1236,6 +1253,21 @@ class AmicaLocalServer {
             path = String(path[..<qIndex])
         }
 
+        // MARK: - User media (imported avatars, background photos)
+        // The bundle is read-only, so anything the user adds lives in Documents
+        // and is served from here instead.
+        if path.hasPrefix("/media/") {
+            guard let fileURL = AmicaUserMedia.fileURL(forPublicPath: path),
+                  let data = try? Data(contentsOf: fileURL) else {
+                logger.info("[Server] user media not found: \(path)")
+                sendResponse(client: client, data: Data("Not Found".utf8), mimeType: "text/plain", statusCode: 404)
+                return
+            }
+            let ext = fileURL.pathExtension
+            sendResponse(client: client, data: data, mimeType: Self.mimeType(for: ext), statusCode: 200)
+            return
+        }
+
         // Remove leading slash
         let relativePath = String(path.dropFirst())
 
@@ -1765,6 +1797,8 @@ struct AmicaFullView: UIViewRepresentable {
         let keychainSentinel = TTSBackend.keychainSentinel
         let characterName = CharacterPack.resolveCharacterName()
         let selectedAvatar = defaults.string(forKey: "selected_avatar") ?? "AvatarSample_A"
+        let avatarURL = AmicaAvatarSelection.vrmURL(for: selectedAvatar)
+        let sceneBackgroundURL = AmicaSceneSettings.backgroundURL(defaults: defaults)
 
         let settingsScript = WKUserScript(
             source: """
@@ -1800,7 +1834,9 @@ struct AmicaFullView: UIViewRepresentable {
                 openai_tts_voice: '\(ttsVoice)',
                 name: '\(characterName)',
                 system_prompt: 'You are \(characterName), a warm, cheerful, and expressive AI companion.',
-                vrm_url: '/vrm/\(selectedAvatar).vrm'
+                bg_url: '\(sceneBackgroundURL)',
+                bg_color: '',
+                vrm_url: '\(avatarURL)'
             };
             window.__scowldVisionEnabled = \(visionEnabledJS);
             // Force full screen coverage
@@ -2277,6 +2313,8 @@ struct AmicaFullView: UIViewRepresentable {
             let visionBackend = "native_ios"
             let characterName = CharacterPack.resolveCharacterName()
             let selectedAvatar = defaults.string(forKey: "selected_avatar") ?? "AvatarSample_A"
+            let avatarURL = AmicaAvatarSelection.vrmURL(for: selectedAvatar)
+            let sceneBackgroundURL = AmicaSceneSettings.backgroundURL(defaults: defaults)
 
             let js = """
                 try {
@@ -2304,7 +2342,9 @@ struct AmicaFullView: UIViewRepresentable {
                     openai_tts_voice: '\(ttsVoice)',
                     name: '\(characterName)',
                     system_prompt: 'You are \(characterName), a warm, cheerful, and expressive AI companion.',
-                    vrm_url: '/vrm/\(selectedAvatar).vrm'
+                    bg_url: '\(sceneBackgroundURL)',
+                    bg_color: '',
+                    vrm_url: '\(avatarURL)'
                 };
                 window.__scowldVisionEnabled = \(visionEnabledJS);
             """
