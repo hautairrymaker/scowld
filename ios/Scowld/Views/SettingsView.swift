@@ -882,6 +882,12 @@ struct SettingsView: View {
             return "ElevenLabs speech uses your API key from Keychain. Celine, Claire, and custom voice IDs are supported."
         case .openAI:
             return "OpenAI text-to-speech reuses your OpenAI API key from Keychain and its built-in voices."
+        case .doubao:
+            return "Doubao speech is called through the app's local proxy, so the key never reaches the web view."
+        case .minimax:
+            return "MiniMax speech is called through the app's local proxy, so the key never reaches the web view."
+        case .fishAudio:
+            return "Fish Audio speech is called through the app's local proxy, so the key never reaches the web view."
         }
     }
 

@@ -352,7 +352,8 @@ extension HostedServiceConfig {
             .map { String($0).lowercased() } ?? ""
         if !language.isEmpty,
            let partial = supported.first(where: {
-               $0.languageCode?.identifier.lowercased() == language
+               // `Locale.languageCode` is the plain two-letter code ("en", "zh").
+               $0.languageCode?.lowercased() == language
            }) {
             return partial.identifier
         }
