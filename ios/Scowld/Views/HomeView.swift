@@ -145,6 +145,10 @@ struct HomeView: View {
     /// Avatar value the page is currently showing, so a change can be swapped in
     /// at runtime instead of reloading the whole web view.
     @State private var appliedAvatarValue: String?
+    @State private var avatarLoadError: String?
+    /// Shared with Settings, which owns the controls.
+    private var focusTimer: FocusTimer { .shared }
+    private var ambience: AmbienceAudio { .shared }
     @State private var cameraOn = true
     @State private var voiceManager = VoiceManager()
     @State private var handsFreeWakeListener = HandsFreeWakeListener()
@@ -173,7 +177,13 @@ struct HomeView: View {
 
     var body: some View {
         NavigationStack {
-            ZStack(alignment: .bottom) {
+            GeometryReader { proxy in
+                // Landscape is what starts a focus session. Size classes are no use
+                // here — on iPad both orientations report `.regular` — so the view's
+                // own proportions are the only dependable signal.
+                let isLandscape = proxy.size.width > proxy.size.height
+
+                ZStack(alignment: .bottom) {
                 AmicaFullView(memoryStore: memoryStore, onCoordinatorReady: { coord in
                     amicaCoordinator = coord
                     coord.setRuntimeActive(isActive)
@@ -183,21 +193,20 @@ struct HomeView: View {
                 .ignoresSafeArea()
 
                 // Assistant captions
-                VStack(spacing: 6) {
-                    if showAICaption && !aiResponseText.isEmpty {
-                        Text(aiResponseText)
-                            .font(.subheadline)
-                            .foregroundStyle(.white.opacity(0.9))
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
-                            .background(.black.opacity(0.5))
-                            .cornerRadius(16)
-                    }
+                assistantCaption
+
+                if isLandscape, FocusTimerSettings.isEnabled() {
+                    focusTimerOverlay
+                        .transition(.move(edge: .top).combined(with: .opacity))
                 }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 126)
-                .allowsHitTesting(false)
+            }
+            .animation(.easeInOut(duration: 0.35), value: isLandscape)
+            .onChange(of: isLandscape) { _, nowLandscape in
+                // Turning the device is the only trigger; there is no start button.
+                if nowLandscape {
+                    focusTimer.startIfIdle()
+                }
+            }
             }
             .navigationTitle("Scowld")
             .navigationBarTitleDisplayMode(.inline)
@@ -223,6 +232,7 @@ struct HomeView: View {
                 .presentationDragIndicator(.visible)
         }
         .onAppear {
+            FocusTimerSettings.registerDefaults()
             ScowldAudioSession.configureAmicaWebAudioPlayback()
 
             Task {
@@ -286,6 +296,14 @@ struct HomeView: View {
         }
         .onChange(of: handsFreeModeEnabled) {
             updateHandsFreeWakeListener()
+        }
+        .alert("Couldn't load that model", isPresented: Binding(
+            get: { avatarLoadError != nil },
+            set: { if !$0 { avatarLoadError = nil } }
+        )) {
+            Button("OK", role: .cancel) { avatarLoadError = nil }
+        } message: {
+            Text(avatarLoadError ?? "")
         }
         .onChange(of: scenePhase) {
             switch scenePhase {
@@ -400,6 +418,55 @@ struct HomeView: View {
 
     // MARK: - Character actions
 
+    /// What the character is currently saying, over the scene.
+    ///
+    /// A frosted panel rather than the flat black slab this used to be, and it
+    /// fades in and drifts up so it does not simply blink into existence. The
+    /// width is capped so a long sentence stays readable instead of stretching
+    /// edge to edge.
+    private var assistantCaption: some View {
+        VStack(spacing: 0) {
+            if showAICaption, !aiResponseText.isEmpty {
+                Text(aiResponseText)
+                    .font(.callout)
+                    .lineSpacing(3)
+                    .foregroundStyle(.white.opacity(0.95))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: 520)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .strokeBorder(.white.opacity(0.14), lineWidth: 0.5)
+                    )
+                    .shadow(color: .black.opacity(0.3), radius: 16, y: 8)
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.bottom, 126)
+        .animation(.easeOut(duration: 0.28), value: aiResponseText)
+        .animation(.easeOut(duration: 0.22), value: showAICaption)
+        .allowsHitTesting(false)
+    }
+
+    /// The focus timer, pinned to the top-right corner in landscape.
+    private var focusTimerOverlay: some View {
+        VStack {
+            HStack {
+                Spacer(minLength: 0)
+                FocusTimerCard(timer: focusTimer, opacity: 0.96)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.top, 10)
+        .padding(.trailing, 16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+        .ignoresSafeArea(edges: .top)
+        .allowsHitTesting(false)
+    }
+
     /// Manual triggers for the bundled body animations and VRM expressions.
     /// Before the viewer bridge existed there was no way for the user to make the
     /// character move on demand.
@@ -432,6 +499,50 @@ struct HomeView: View {
                     Label("Reset camera", systemImage: "camera.metering.center.weighted")
                 }
             }
+
+            Section("Sound") {
+                Menu {
+                    ForEach(AmbientTrack.allCases) { track in
+                        Button {
+                            ambience.play(track)
+                        } label: {
+                            Label(LocalizedStringKey(track.title), systemImage: track.systemImage)
+                        }
+                    }
+                } label: {
+                    Label(
+                        ambience.track.map { "Ambience: \($0.title)" } ?? "Ambience",
+                        systemImage: "waveform"
+                    )
+                }
+
+                if ambience.track != nil {
+                    Button(role: .destructive) {
+                        ambience.stopAmbience()
+                    } label: {
+                        Label("Stop ambience", systemImage: "speaker.slash.fill")
+                    }
+                }
+
+                Button {
+                    ambience.toggleMusicPlayback()
+                } label: {
+                    Label(
+                        ambience.isMusicPlaying
+                            ? "Pause music"
+                            : (ambience.currentTrack?.displayName ?? "Play music"),
+                        systemImage: ambience.isMusicPlaying ? "pause.fill" : "music.note"
+                    )
+                }
+
+                if !ambience.musicTracks.isEmpty {
+                    Button {
+                        ambience.nextTrack()
+                    } label: {
+                        Label("Next track", systemImage: "forward.fill")
+                    }
+                }
+            }
         } label: {
             Image(systemName: "sparkles")
                 .font(.system(size: 22, weight: .semibold))
@@ -454,15 +565,161 @@ struct HomeView: View {
 
     /// Swaps the character model when the avatar selection changed. This runs
     /// without reloading the page, so an imported model appears immediately.
+    ///
+    /// Imported models are loaded from `/media/avatars/...`. The page normally
+    /// resolves its model by looking that URL up in a list compiled into it, so the
+    /// bundled list is extended at runtime with `__scowldExtraVrms` to accept those
+    /// URLs. Should that ever stop working — an upstream update, for instance — the
+    /// load is retried through the free `AvatarSample_D` slot, which the local
+    /// server maps onto the same file. The two mechanisms are independent, so the
+    /// second still works when the first does not.
     private func applyAvatarIfChanged() {
         let stored = UserDefaults.standard.string(forKey: "selected_avatar") ?? "AvatarSample_A"
         guard stored != appliedAvatarValue else { return }
         appliedAvatarValue = stored
-        runViewerScript(AmicaViewerBridge.loadAvatarScript(
-            url: AmicaAvatarSelection.vrmURL(for: stored),
-            name: AmicaAvatarSelection.displayName(for: stored, characterName: "")
-        ))
+
+        guard let webView = amicaCoordinator?.webView else { return }
+
+        let displayName = AmicaAvatarSelection.displayName(for: stored, characterName: "")
+        let primaryURL = AmicaAvatarSelection.vrmURL(for: stored)
+        let isImported = AmicaAvatarSelection.isImported(stored)
+        let fallbackURL = isImported ? AmicaViewerBridge.customAvatarSlotURL : nil
+
+        // Size of the file we expect the page to receive, used only to explain a
+        // failure. A short download and an unparseable model look identical on
+        // screen, and they need very different fixes.
+        let expectedBytes: Int64? = isImported
+            ? AmicaUserMedia.slotOverrideFileURL().flatMap { url -> Int64? in
+                let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+                return (attributes?[.size] as? NSNumber)?.int64Value
+            }
+            : nil
+
+        loadAvatar(
+            urls: Array([primaryURL, fallbackURL].compactMap { $0 }),
+            name: displayName,
+            displayName: displayName,
+            probeURL: primaryURL,
+            expectedBytes: expectedBytes,
+            webView: webView
+        )
     }
+
+    /// Tries each URL in turn. Only when every option is out — and the stage is
+    /// still empty a moment later — is the user told.
+    private func loadAvatar(
+        urls: [String],
+        name: String,
+        displayName: String,
+        probeURL: String,
+        expectedBytes: Int64?,
+        webView: WKWebView
+    ) {
+        guard let url = urls.first else {
+            verifyAvatarEventuallyLoaded(
+                displayName: displayName,
+                probeURL: probeURL,
+                expectedBytes: expectedBytes,
+                webView: webView
+            )
+            return
+        }
+
+        webView.evaluateJavaScript(AmicaViewerBridge.loadAvatarScript(url: url, name: name)) { result, error in
+            if let error {
+                DebugLog.shared.add("[Viewer] avatar swap failed for \(url): \(error.localizedDescription)")
+            }
+            // A JS error and an explicit `false` both mean the model is not on screen.
+            if (result as? Bool) == true { return }
+            DebugLog.shared.add("[Viewer] avatar \(url) was rejected, trying the next option")
+            loadAvatar(
+                urls: Array(urls.dropFirst()),
+                name: name,
+                displayName: displayName,
+                probeURL: probeURL,
+                expectedBytes: expectedBytes,
+                webView: webView
+            )
+        }
+    }
+
+    /// Confirms the stage really is empty before complaining.
+    ///
+    /// Saving an avatar also reloads the page, and the model then loads from the new
+    /// configuration on its own. Reporting a failure from the swap that raced that
+    /// reload would be a false alarm, so the viewer is asked whether anything is on
+    /// screen for a few seconds first.
+    private func verifyAvatarEventuallyLoaded(
+        displayName: String,
+        probeURL: String,
+        expectedBytes: Int64?,
+        webView: WKWebView,
+        attemptsLeft: Int = 8
+    ) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            let probe = "!!(window.__viewer && window.__viewer.model && window.__viewer.model.vrm)"
+            webView.evaluateJavaScript(probe) { result, _ in
+                if (result as? Bool) == true { return }
+                if attemptsLeft > 1 {
+                    verifyAvatarEventuallyLoaded(
+                        displayName: displayName,
+                        probeURL: probeURL,
+                        expectedBytes: expectedBytes,
+                        webView: webView,
+                        attemptsLeft: attemptsLeft - 1
+                    )
+                    return
+                }
+                diagnoseAvatarDelivery(probeURL, expectedBytes: expectedBytes, webView: webView) { detail in
+                    DispatchQueue.main.async {
+                        avatarLoadError = "\"\(displayName)\" could not be loaded, so the previous character is still shown.\(detail)"
+                    }
+                }
+            }
+        }
+    }
+
+    /// Asks the page to download the model itself, so a failed load can be told
+    /// apart from a failed transfer.
+    private func diagnoseAvatarDelivery(
+        _ url: String,
+        expectedBytes: Int64?,
+        webView: WKWebView,
+        completion: @escaping (String) -> Void
+    ) {
+        let safeURL = url.replacingOccurrences(of: "'", with: "")
+        let js = """
+        (function() {
+            return fetch('\(safeURL)', { cache: 'no-store' }).then(function(r) {
+                return r.arrayBuffer().then(function(b) {
+                    return r.status + '|' + b.byteLength;
+                });
+            }).catch(function(e) { return '0|0'; });
+        })()
+        """
+
+        webView.evaluateJavaScript(js) { result, _ in
+            guard let raw = result as? String else {
+                completion("")
+                return
+            }
+            let parts = raw.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
+            let status = parts.first ?? "0"
+            let received = parts.count > 1 ? (Int64(parts[1]) ?? 0) : 0
+
+            if status != "200" {
+                completion("\n\nThe file could not be read from the app's storage (HTTP \(status)).")
+            } else if let expected = expectedBytes, expected > 0, received != expected {
+                let got = Double(received) / 1_048_576
+                let want = Double(expected) / 1_048_576
+                completion(String(format: "\n\nThe file arrived incomplete (%.1f MB of %.1f MB).", got, want))
+            } else {
+                let size = Double(received) / 1_048_576
+                completion(String(format: "\n\nThe file arrived complete (%.1f MB), so this model is not one the viewer can display.", size))
+            }
+        }
+    }
+
     private var recordingComposerBar: some View {
         HStack(spacing: 10) {
             Button {
@@ -1138,6 +1395,10 @@ class AmicaLocalServer {
                 guard let self else { return }
                 let client = accept(self.serverSocket, nil, nil)
                 if client >= 0 {
+                    // Downloading a big model takes long enough that the page can go
+                    // away mid-transfer. Without this, the resulting write to a dead
+                    // socket raises SIGPIPE and takes the whole app down.
+                    Self.configureClientSocket(client)
                     DispatchQueue.global(qos: .userInitiated).async {
                         self.handleClient(client)
                     }
@@ -1257,8 +1518,10 @@ class AmicaLocalServer {
         // The bundle is read-only, so anything the user adds lives in Documents
         // and is served from here instead.
         if path.hasPrefix("/media/") {
+            // Mapped, not copied: imported avatars can be tens of megabytes and a
+            // full in-memory copy on top of the WebView is pure waste.
             guard let fileURL = AmicaUserMedia.fileURL(forPublicPath: path),
-                  let data = try? Data(contentsOf: fileURL) else {
+                  let data = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else {
                 logger.info("[Server] user media not found: \(path)")
                 sendResponse(client: client, data: Data("Not Found".utf8), mimeType: "text/plain", statusCode: 404)
                 return
@@ -1268,17 +1531,45 @@ class AmicaLocalServer {
             return
         }
 
+        // MARK: - Custom avatar slot
+        // The page only ever loads a model whose URL appears in the list it was
+        // compiled with, and that list names four models while the bundle ships
+        // three — `AvatarSample_D.vrm` has never existed. Imported models are
+        // registered with the list at runtime, but this slot is the safety net:
+        // it is always recognised, and it serves whichever imported model is
+        // currently selected.
+        if path == "/vrm/AvatarSample_D.vrm" {
+            if let fileURL = AmicaUserMedia.slotOverrideFileURL(),
+               let data = try? Data(contentsOf: fileURL, options: .mappedIfSafe) {
+                logger.info("[Server] serving custom avatar through the D slot")
+                sendResponse(client: client, data: data, mimeType: Self.mimeType(for: fileURL.pathExtension), statusCode: 200)
+            } else {
+                sendResponse(client: client, data: Data("Not Found".utf8), mimeType: "text/plain", statusCode: 404)
+            }
+            return
+        }
+
+        if path == "/vrm/thumb-AvatarSample_D.vrm.jpg" {
+            let placeholder = "\(amicaBasePath)/vrm/thumb-placeholder.jpg"
+            if let data = try? Data(contentsOf: URL(fileURLWithPath: placeholder), options: .mappedIfSafe) {
+                sendResponse(client: client, data: data, mimeType: "image/jpeg", statusCode: 200)
+            } else {
+                sendResponse(client: client, data: Data("Not Found".utf8), mimeType: "text/plain", statusCode: 404)
+            }
+            return
+        }
+
         // Remove leading slash
         let relativePath = String(path.dropFirst())
 
         let filePath = "\(amicaBasePath)/\(relativePath)"
 
         guard FileManager.default.fileExists(atPath: filePath),
-              let data = try? Data(contentsOf: URL(fileURLWithPath: filePath)) else {
+              let data = try? Data(contentsOf: URL(fileURLWithPath: filePath), options: .mappedIfSafe) else {
             // Try with .html
             let htmlPath = "\(amicaBasePath)/\(relativePath).html"
             if FileManager.default.fileExists(atPath: htmlPath),
-               let data = try? Data(contentsOf: URL(fileURLWithPath: htmlPath)) {
+               let data = try? Data(contentsOf: URL(fileURLWithPath: htmlPath), options: .mappedIfSafe) {
                 sendResponse(client: client, data: data, mimeType: "text/html", statusCode: 200)
                 return
             }
@@ -1302,11 +1593,45 @@ class AmicaLocalServer {
         header += "\r\n"
 
         let headerData = Data(header.utf8)
-        headerData.withUnsafeBytes { ptr in
-            _ = write(client, ptr.baseAddress!, headerData.count)
-        }
-        data.withUnsafeBytes { ptr in
-            _ = write(client, ptr.baseAddress!, data.count)
+        Self.writeAll(client: client, data: headerData)
+        Self.writeAll(client: client, data: data)
+    }
+
+    /// Makes a connection safe to write a large body to: no SIGPIPE when the peer
+    /// disappears, and a send timeout so a stalled client cannot pin a thread.
+    static func configureClientSocket(_ client: Int32) {
+        var yes: Int32 = 1
+        setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout<Int32>.size))
+
+        var timeout = timeval(tv_sec: 30, tv_usec: 0)
+        setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    }
+
+    /// Writes every byte of `data` to a blocking socket.
+    ///
+    /// A single `write` is not enough: on a blocking socket the call returns as
+    /// soon as the kernel send buffer is full, so it can report fewer bytes than
+    /// requested. Ignoring that return value silently truncated large payloads —
+    /// a big VRM arrived at the page as an unparseable file while small assets
+    /// were fine. Retrying until the buffer is drained fixes every download.
+    static func writeAll(client: Int32, data: Data) {
+        let total = data.count
+        guard total > 0 else { return }
+        data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            var offset = 0
+            while offset < total {
+                let written = write(client, base.advanced(by: offset), total - offset)
+                if written > 0 {
+                    offset += written
+                } else if written == -1 && errno == EINTR {
+                    continue
+                } else {
+                    // EPIPE / ETIMEDOUT / EAGAIN: the peer is gone. Nothing to do
+                    // but give up; the connection is closed by the caller.
+                    break
+                }
+            }
         }
     }
 
@@ -1799,6 +2124,9 @@ struct AmicaFullView: UIViewRepresentable {
         let selectedAvatar = defaults.string(forKey: "selected_avatar") ?? "AvatarSample_A"
         let avatarURL = AmicaAvatarSelection.vrmURL(for: selectedAvatar)
         let sceneBackgroundURL = AmicaSceneSettings.backgroundURL(defaults: defaults)
+        let extraVrmsJS = AmicaUserMedia.importedAvatarPublicPaths()
+            .map { "'\($0)'" }
+            .joined(separator: ", ")
 
         let settingsScript = WKUserScript(
             source: """
@@ -1838,6 +2166,10 @@ struct AmicaFullView: UIViewRepresentable {
                 bg_color: '',
                 vrm_url: '\(avatarURL)'
             };
+            // Imported models, for the page's own model list. Without this the
+            // built-in list has no entry matching `vrm_url` and the page loads
+            // nothing at all.
+            window.__scowldExtraVrms = [\(extraVrmsJS)];
             window.__scowldVisionEnabled = \(visionEnabledJS);
             // Force full screen coverage
             var meta = document.createElement('meta');
@@ -2315,6 +2647,9 @@ struct AmicaFullView: UIViewRepresentable {
             let selectedAvatar = defaults.string(forKey: "selected_avatar") ?? "AvatarSample_A"
             let avatarURL = AmicaAvatarSelection.vrmURL(for: selectedAvatar)
             let sceneBackgroundURL = AmicaSceneSettings.backgroundURL(defaults: defaults)
+            let extraVrmsJS = AmicaUserMedia.importedAvatarPublicPaths()
+                .map { "'\($0)'" }
+                .joined(separator: ", ")
 
             let js = """
                 try {
@@ -2346,6 +2681,7 @@ struct AmicaFullView: UIViewRepresentable {
                     bg_color: '',
                     vrm_url: '\(avatarURL)'
                 };
+                window.__scowldExtraVrms = [\(extraVrmsJS)];
                 window.__scowldVisionEnabled = \(visionEnabledJS);
             """
             // Update the user script with new config, then reload

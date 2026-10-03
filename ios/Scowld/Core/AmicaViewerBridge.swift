@@ -67,21 +67,40 @@ enum AmicaViewerBridge {
         };
 
         // Swaps the character model at runtime, without reloading the page.
+        //
+        // `loadVrm` unloads the current model before it parses the new file, so a
+        // failure would otherwise leave an empty stage. It also *resolves* when the
+        // parse fails (it bails out once `model.vrm` is missing), which is why the
+        // result is checked rather than trusted. On failure the last working model
+        // is put back, and `false` is reported so the app can explain what happened.
         window.__scowldLoadAvatar = function(url, name) {
             return new Promise(function(resolve) {
-                try {
-                    var v = window.__viewer;
-                    if (!v || typeof v.loadVrm !== 'function' || !url) { resolve(false); return; }
-                    v.loadVrm(url, name || 'avatar')
-                        .then(function() { resolve(true); })
-                        .catch(function(e) {
-                            console.error('[Scowld] loadVrm failed: ' + e);
-                            resolve(false);
-                        });
-                } catch (e) {
-                    console.error('[Scowld] loadVrm threw: ' + e);
-                    resolve(false);
-                }
+                var v = window.__viewer;
+                if (!v || typeof v.loadVrm !== 'function' || !url) { resolve(false); return; }
+
+                var previous = window.__scowldLastGoodAvatar || {
+                    url: '/vrm/AvatarSample_A.vrm',
+                    name: 'AvatarSample_A'
+                };
+
+                v.loadVrm(url, name || 'avatar')
+                    .then(function() {
+                        if (v.model && v.model.vrm) {
+                            window.__scowldLastGoodAvatar = { url: url, name: name || 'avatar' };
+                            window.__scowldLastAvatarError = null;
+                            resolve(true);
+                            return;
+                        }
+                        throw new Error('the viewer kept no model');
+                    })
+                    .catch(function(e) {
+                        window.__scowldLastAvatarError = String(e);
+                        console.error('[Scowld] loadVrm failed: ' + e);
+                        if (previous && previous.url !== url) {
+                            try { v.loadVrm(previous.url, previous.name); } catch (e2) {}
+                        }
+                        resolve(false);
+                    });
             });
         };
 
@@ -253,6 +272,14 @@ enum AmicaViewerBridge {
     static func expressionScript(_ expression: String) -> String {
         "window.__scowldSetExpression && window.__scowldSetExpression('\(escaped(expression))')"
     }
+
+    /// The free model slot in the page's compiled-in model list.
+    ///
+    /// That list names `AvatarSample_A` through `AvatarSample_D`, but the bundle
+    /// only ships A–C, so D has always been a 404. The local server answers it with
+    /// whichever imported model is selected, so an imported avatar always has at
+    /// least one address the page will accept.
+    static let customAvatarSlotURL = "/vrm/AvatarSample_D.vrm"
 
     static let resetCameraScript = "window.__scowldResetCamera && window.__scowldResetCamera()"
 

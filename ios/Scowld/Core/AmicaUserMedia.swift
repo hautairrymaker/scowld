@@ -16,6 +16,7 @@ enum AmicaUserMedia {
     enum Kind: String {
         case backgrounds
         case avatars
+        case music
     }
 
     /// Everything the user adds lives under here.
@@ -120,6 +121,91 @@ enum AmicaUserMedia {
         try? FileManager.default.removeItem(at: url)
     }
 
+    /// Every imported model as a `/media/...` path.
+    ///
+    /// The bundled page resolves "which model to show" by looking the configured
+    /// `vrm_url` up in a list held in memory, and that list only ever contains the
+    /// four model URLs compiled into it. Imported files therefore have to be added
+    /// to that list at runtime — see the `__scowldExtraVrms` hook in the patched
+    /// `index-aadeae00c0804a21.js`.
+    static func importedAvatarPublicPaths() -> [String] {
+        importedAvatars().map(\.publicPath)
+    }
+
+    /// File that the free `AvatarSample_D.vrm` slot should serve.
+    ///
+    /// The bundled list declares four models but ships only three files, so
+    /// `AvatarSample_D` is a permanent 404. Pointing it at whatever imported model
+    /// is selected gives the viewer a whitelisted address to fall back on.
+    static func slotOverrideFileURL(defaults: UserDefaults = .standard) -> URL? {
+        let selected = defaults.string(forKey: "selected_avatar") ?? ""
+        guard selected.hasPrefix("/") else { return nil }
+        return fileURL(forPublicPath: selected)
+    }
+
+    // MARK: - Music
+
+    /// Extensions the system can decode and that we accept from the picker.
+    static let musicExtensions: Set<String> = [
+        "mp3", "m4a", "aac", "wav", "aif", "aiff", "caf", "flac", "ogg", "opus",
+    ]
+
+    /// Copies a picked audio file into the media folder. Returns its public path.
+    static func importMusic(from sourceURL: URL) -> String? {
+        let needsScope = sourceURL.startAccessingSecurityScopedResource()
+        defer { if needsScope { sourceURL.stopAccessingSecurityScopedResource() } }
+
+        let ext = sourceURL.pathExtension.lowercased()
+        guard musicExtensions.contains(ext) else { return nil }
+
+        let name = uniqueFileName(sanitized(sourceURL.lastPathComponent), in: .music)
+        let destination = directoryURL(for: .music).appendingPathComponent(name)
+        do {
+            if FileManager.default.fileExists(atPath: destination.path) {
+                try FileManager.default.removeItem(at: destination)
+            }
+            try FileManager.default.copyItem(at: sourceURL, to: destination)
+            return publicPath(for: .music, fileName: name)
+        } catch {
+            return nil
+        }
+    }
+
+    static func importedMusic() -> [AmicaMediaFile] {
+        files(in: .music) { url in
+            musicExtensions.contains(url.pathExtension.lowercased())
+        }
+    }
+
+    static func deleteMusic(fileName: String) {
+        let url = directoryURL(for: .music).appendingPathComponent(fileName)
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    // MARK: - Lists
+
+    /// Every file of a kind, newest name ordering aside. Shared by the avatar and
+    /// music pickers.
+    static func files(
+        in kind: Kind,
+        matching isIncluded: (URL) -> Bool = { _ in true }
+    ) -> [AmicaMediaFile] {
+        let directory = directoryURL(for: kind)
+        let contents = (try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.fileSizeKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+
+        return contents
+            .filter(isIncluded)
+            .map { url in
+                let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                return AmicaMediaFile(kind: kind, fileName: url.lastPathComponent, byteSize: Int64(size))
+            }
+            .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    }
+
     // MARK: - Helpers
 
     private static func sanitized(_ name: String) -> String {
@@ -129,22 +215,42 @@ enum AmicaUserMedia {
         return result.isEmpty ? "avatar.vrm" : result
     }
 
-    private static func uniqueAvatarFileName(_ name: String) -> String {
+    private static func uniqueFileName(_ name: String, in kind: Kind) -> String {
         let base = (name as NSString).deletingPathExtension
         let ext = (name as NSString).pathExtension
         var candidate = name
         var counter = 2
         while FileManager.default.fileExists(
-            atPath: directoryURL(for: .avatars).appendingPathComponent(candidate).path
+            atPath: directoryURL(for: kind).appendingPathComponent(candidate).path
         ) {
             candidate = "\(base)-\(counter).\(ext)"
             counter += 1
         }
         return candidate
     }
+
+    private static func uniqueAvatarFileName(_ name: String) -> String {
+        uniqueFileName(name, in: .avatars)
+    }
 }
 
 // MARK: - Imported avatar
+
+/// A file the user added, in whichever media folder it lives.
+struct AmicaMediaFile: Identifiable, Hashable {
+    let kind: AmicaUserMedia.Kind
+    let fileName: String
+    let byteSize: Int64
+
+    var id: String { "\(kind.rawValue)/\(fileName)" }
+
+    var displayName: String { (fileName as NSString).deletingPathExtension }
+
+    /// Where the viewer or player can read it, e.g. `/media/music/song.mp3`.
+    var publicPath: String { AmicaUserMedia.publicPath(for: kind, fileName: fileName) }
+
+    var sizeLabel: String { String(format: "%.1f MB", Double(byteSize) / 1_048_576) }
+}
 
 struct AmicaImportedAvatar: Identifiable, Hashable {
     let fileName: String

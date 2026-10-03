@@ -61,6 +61,21 @@ struct SettingsView: View {
     @State private var backgroundPhotoItem: PhotosPickerItem?
     @State private var isPickingBackgroundPhoto = false
     @State private var importedAvatars: [AmicaImportedAvatar] = []
+
+    // MARK: - Focus timer
+    @State private var focusTimerEnabled = true
+    @State private var focusTimerModeID = FocusTimerMode.countdown.rawValue
+    @State private var focusMinutes = 25
+    @State private var restMinutes = 5
+    @State private var focusAutoRest = true
+    @State private var focusChime = true
+
+    // MARK: - Ambience & music
+    @State private var importedMusic: [AmicaMediaFile] = []
+    @State private var isImportingMusic = false
+    @State private var ambienceMessage: String?
+    private var ambience: AmbienceAudio { .shared }
+    private var focusTimer: FocusTimer { .shared }
     @State private var isImportingAvatar = false
     @State private var mediaMessage: String?
     @State private var mediaMessageIsError = false
@@ -114,6 +129,10 @@ struct SettingsView: View {
                                 }
                         }
                     }
+
+                    focusTimerSection
+
+                    ambienceSection
 
                     aiProviderSection
                     sttProviderSection
@@ -430,6 +449,13 @@ struct SettingsView: View {
                 allowsMultipleSelection: false
             ) { result in
                 handleAvatarImport(result)
+            }
+            .fileImporter(
+                isPresented: $isImportingMusic,
+                allowedContentTypes: [.audio],
+                allowsMultipleSelection: true
+            ) { result in
+                handleMusicImport(result)
             }
             .onChange(of: backgroundPhotoItem) {
                 handleBackgroundPhoto()
@@ -833,6 +859,224 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - Focus timer
+
+    /// The focus session has no controls on the scene itself; everything is here.
+    private var focusTimerSection: some View {
+        settingsSection(
+            "Focus Timer",
+            icon: "timer",
+            footer: "Turning the device to landscape starts a session automatically; portrait hides the timer but it keeps running. A plain local notification alerts you when a countdown ends."
+        ) {
+            settingRow {
+                Toggle("Enable focus timer", isOn: $focusTimerEnabled)
+                    .tint(.amicaBlue)
+                    .onChange(of: focusTimerEnabled) {
+                        guard !isLoadingSettings else { return }
+                        saveFocusTimerSettings()
+                    }
+            }
+
+            settingRow {
+                Picker("Mode", selection: $focusTimerModeID) {
+                    ForEach(FocusTimerMode.allCases) { mode in
+                        Text(LocalizedStringKey(mode.title)).tag(mode.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+                .onChange(of: focusTimerModeID) {
+                    guard !isLoadingSettings else { return }
+                    saveFocusTimerSettings()
+                }
+            }
+
+            if let mode = FocusTimerMode(rawValue: focusTimerModeID) {
+                settingsInfoRow(title: mode.explanation, systemImage: "info.circle")
+            }
+
+            if FocusTimerMode(rawValue: focusTimerModeID) == .countdown {
+                settingRow {
+                    Stepper("Focus: \(focusMinutes) min", value: $focusMinutes, in: 5...180, step: 5)
+                        .onChange(of: focusMinutes) {
+                            guard !isLoadingSettings else { return }
+                            saveFocusTimerSettings()
+                        }
+                }
+
+                settingRow {
+                    Stepper("Break: \(restMinutes) min", value: $restMinutes, in: 1...60, step: 1)
+                        .onChange(of: restMinutes) {
+                            guard !isLoadingSettings else { return }
+                            saveFocusTimerSettings()
+                        }
+                }
+
+                settingRow {
+                    Toggle("Start the break automatically", isOn: $focusAutoRest)
+                        .tint(.amicaBlue)
+                        .onChange(of: focusAutoRest) {
+                            guard !isLoadingSettings else { return }
+                            saveFocusTimerSettings()
+                        }
+                }
+            }
+
+            settingRow {
+                Toggle("Chime when a session ends", isOn: $focusChime)
+                    .tint(.amicaBlue)
+                    .onChange(of: focusChime) {
+                        guard !isLoadingSettings else { return }
+                        saveFocusTimerSettings()
+                    }
+            }
+
+            if focusTimer.isRunning {
+                settingsInfoRow(
+                    title: "\(focusTimer.phase.title) · \(focusTimer.displayText)",
+                    systemImage: "hourglass"
+                )
+
+                settingsActionRow(
+                    title: "End this session",
+                    subtitle: "Stops the timer and clears the countdown",
+                    systemImage: "stop.circle"
+                ) {
+                    focusTimer.stop()
+                }
+            }
+        }
+    }
+
+    // MARK: - Ambience & music
+
+    private var ambienceSection: some View {
+        settingsSection(
+            "Ambience & Music",
+            icon: "waveform",
+            footer: "Ambience and music are independent: play either one, or both together. Ambient loops ship with the app; music files are yours."
+        ) {
+            settingRow {
+                Picker("Ambience", selection: Binding(
+                    get: { ambience.track?.rawValue ?? "" },
+                    set: { newValue in
+                        ambience.play(AmbientTrack(rawValue: newValue))
+                    }
+                )) {
+                    Text("Off").tag("")
+                    ForEach(AmbientTrack.allCases) { track in
+                        Label(LocalizedStringKey(track.title), systemImage: track.systemImage).tag(track.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+
+            settingRow {
+                HStack(spacing: 10) {
+                    Image(systemName: "speaker.wave.1.fill")
+                        .foregroundStyle(.secondary)
+                    Slider(value: Binding(
+                        get: { ambience.noiseVolume },
+                        set: { ambience.noiseVolume = $0 }
+                    ), in: 0...1)
+                }
+            }
+
+            Divider().opacity(0.3)
+
+            if importedMusic.isEmpty {
+                settingsInfoRow(
+                    title: "No music yet. Add your own files and they play here, separately from the ambience.",
+                    systemImage: "music.note.list"
+                )
+            } else {
+                settingRow {
+                    HStack(spacing: 10) {
+                        Button {
+                            ambience.toggleMusicPlayback()
+                        } label: {
+                            Image(systemName: ambience.isMusicPlaying ? "pause.circle.fill" : "play.circle.fill")
+                                .font(.system(size: 26))
+                                .foregroundStyle(.amicaBlue)
+                        }
+                        .buttonStyle(.plain)
+
+                        Text(ambience.currentTrack?.displayName ?? "Nothing playing")
+                            .lineLimit(1)
+                            .foregroundStyle(.secondary)
+
+                        Spacer(minLength: 0)
+
+                        Button { ambience.previousTrack() } label: {
+                            Image(systemName: "backward.fill")
+                        }
+                        .buttonStyle(.plain)
+
+                        Button { ambience.nextTrack() } label: {
+                            Image(systemName: "forward.fill")
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                settingRow {
+                    HStack(spacing: 10) {
+                        Image(systemName: "speaker.wave.1.fill")
+                            .foregroundStyle(.secondary)
+                        Slider(value: Binding(
+                            get: { ambience.musicVolume },
+                            set: { ambience.musicVolume = $0 }
+                        ), in: 0...1)
+                    }
+                }
+
+                ForEach(importedMusic) { file in
+                    settingRow {
+                        HStack(spacing: 10) {
+                            Image(systemName: "music.note")
+                                .foregroundStyle(.secondary)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(file.displayName)
+                                    .lineLimit(1)
+                                Text(file.sizeLabel)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Spacer(minLength: 0)
+
+                            Button {
+                                ambience.playMusic(file)
+                            } label: {
+                                Image(systemName: "play.fill")
+                            }
+                            .buttonStyle(.plain)
+
+                            Button(role: .destructive) {
+                                deleteMusic(file)
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+
+            settingsActionRow(
+                title: "Add music…",
+                subtitle: "Pick audio files from your device",
+                systemImage: "plus.circle"
+            ) {
+                isImportingMusic = true
+            }
+
+            if let ambienceMessage {
+                settingsInfoRow(title: ambienceMessage, systemImage: "info.circle")
+            }
+        }
+    }
+
     private func settingsSection<Content: View>(
         _ title: String,
         icon: String,
@@ -1081,11 +1325,74 @@ struct SettingsView: View {
         subjectOffset = AmicaSceneSettings.subjectOffset(defaults: defaults)
         zoomMax = AmicaSceneSettings.zoomMax(defaults: defaults)
         reloadImportedAvatars()
+        loadFocusTimerSettings()
+        reloadImportedMusic()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             isLoadingSettings = false
             hasCharacterChanges = false
         }
+    }
+
+    // MARK: - Focus timer settings
+
+    private func loadFocusTimerSettings() {
+        let defaults = UserDefaults.standard
+        FocusTimerSettings.registerDefaults()
+        focusTimerEnabled = FocusTimerSettings.isEnabled(defaults: defaults)
+        focusTimerModeID = FocusTimerSettings.mode(defaults: defaults).rawValue
+        focusMinutes = FocusTimerSettings.focusMinutes(defaults: defaults)
+        restMinutes = FocusTimerSettings.restMinutes(defaults: defaults)
+        focusAutoRest = FocusTimerSettings.autoRest(defaults: defaults)
+        focusChime = FocusTimerSettings.playsChime(defaults: defaults)
+    }
+
+    private func saveFocusTimerSettings() {
+        let defaults = UserDefaults.standard
+        defaults.set(focusTimerEnabled, forKey: FocusTimerSettings.enabledKey)
+        defaults.set(focusTimerModeID, forKey: FocusTimerSettings.modeKey)
+        defaults.set(focusMinutes, forKey: FocusTimerSettings.focusMinutesKey)
+        defaults.set(restMinutes, forKey: FocusTimerSettings.restMinutesKey)
+        defaults.set(focusAutoRest, forKey: FocusTimerSettings.autoRestKey)
+        defaults.set(focusChime, forKey: FocusTimerSettings.chimeKey)
+
+        // Turning it off should not leave a session running in the background.
+        if !focusTimerEnabled {
+            focusTimer.stop()
+        }
+    }
+
+    // MARK: - Music
+
+    private func reloadImportedMusic() {
+        importedMusic = AmicaUserMedia.importedMusic()
+        ambience.refreshMusicLibrary()
+    }
+
+    private func handleMusicImport(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard !urls.isEmpty else { return }
+            var added = 0
+            for url in urls where AmicaUserMedia.importMusic(from: url) != nil {
+                added += 1
+            }
+            reloadImportedMusic()
+            ambienceMessage = added > 0
+                ? "Added \(added) track\(added == 1 ? "" : "s")"
+                : "Those files could not be added"
+        case .failure(let error):
+            ambienceMessage = "Import failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func deleteMusic(_ file: AmicaMediaFile) {
+        if ambience.currentTrack?.id == file.id {
+            ambience.stopMusic()
+        }
+        AmicaUserMedia.deleteMusic(fileName: file.fileName)
+        reloadImportedMusic()
+        ambienceMessage = "Removed \(file.displayName)"
     }
 
     private func loadAIProviderSettings(resetMessage: Bool = true) {
