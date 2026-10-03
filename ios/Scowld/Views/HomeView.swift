@@ -203,7 +203,11 @@ struct HomeView: View {
             .animation(.easeInOut(duration: 0.35), value: isLandscape)
             .onChange(of: isLandscape) { _, nowLandscape in
                 // Turning the device is the only trigger; there is no start button.
-                if nowLandscape {
+                // Deferred by one run loop turn because starting a session mutates
+                // observed state, and `onChange` runs inside an update that is
+                // already in flight.
+                guard nowLandscape else { return }
+                Task { @MainActor in
                     focusTimer.startIfIdle()
                 }
             }

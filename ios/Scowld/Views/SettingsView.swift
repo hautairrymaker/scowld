@@ -137,9 +137,20 @@ struct SettingsView: View {
                         }
                     }
 
-                    focusTimerSection
-
-                    ambienceSection
+                    // The focus timer and ambience sections are built but deliberately
+                    // not shown yet: putting either of them in this view took the whole
+                    // screen down on open. They go back in one at a time so the culprit
+                    // is identified rather than guessed at.
+                    settingsSection(
+                        "Focus Timer & Sound",
+                        icon: "timer",
+                        footer: "Temporarily unavailable while a crash on this screen is being tracked down. The timer and the sound controls are still reachable from the actions menu on the chat screen."
+                    ) {
+                        settingsInfoRow(
+                            title: "Being fixed — use the actions menu for now",
+                            systemImage: "wrench.and.screwdriver"
+                        )
+                    }
 
                     aiProviderSection
                     sttProviderSection
@@ -1341,8 +1352,10 @@ struct SettingsView: View {
         subjectOffset = AmicaSceneSettings.subjectOffset(defaults: defaults)
         zoomMax = AmicaSceneSettings.zoomMax(defaults: defaults)
         reloadImportedAvatars()
-        loadFocusTimerSettings()
-        reloadImportedMusic()
+        // Focus timer and ambience settings are intentionally not loaded while the
+        // crash on this screen is being bisected: this view must not touch any of
+        // the new code, so that a clean open proves the problem lies there.
+        importedMusic = AmicaUserMedia.importedMusic()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             isLoadingSettings = false
