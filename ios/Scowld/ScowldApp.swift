@@ -32,8 +32,8 @@ struct ScowldRootView: View {
     @AppStorage("startup_onboarding_completed") private var hasCompletedStartupOnboarding = false
     @State private var selectedTab: ScowldTab = .chat
     @State private var appUpdateState: AppUpdateState = .idle
-    /// Left behind by the previous run when it ended abruptly.
-    @State private var crashReport: String? = CrashCatcher.pendingReport
+    /// Filled in on launch from whatever the previous run left behind.
+    @State private var crashReport: String?
 
     var body: some View {
         Group {
@@ -48,6 +48,9 @@ struct ScowldRootView: View {
         .task {
             await checkForAppUpdateIfNeeded()
         }
+        .onAppear {
+            presentLaunchDiagnostic()
+        }
         .onChange(of: selectedTab) { _, tab in
             CrashCatcher.breadcrumb("tab -> \(String(describing: tab))")
         }
@@ -61,6 +64,38 @@ struct ScowldRootView: View {
             }
         }
     }
+
+    /// Reports what the previous run recorded.
+    ///
+    /// Shown whether or not a crash was caught, and on the first launch of a fresh
+    /// install too. A card that always appears is also the only dependable way to
+    /// confirm that this build is the one actually running.
+    private func presentLaunchDiagnostic() {
+        guard crashReport == nil else { return }
+
+        guard let trail = CrashCatcher.pendingReport, CrashCatcher.hadPreviousRun else {
+            crashReport = """
+            \(ScowldRootView.buildTag)
+
+            这是本次安装的第一次启动，所以还没有上一次的记录。
+
+            请按顺序做两件事：
+            1. 点一次「设置」（大概率还是会闪退）
+            2. 重新打开 App —— 这一次就会显示上一次的记录
+
+            如果这张卡片以后再也没有出现过，说明装上的不是这个版本。
+            """
+            return
+        }
+
+        let verdict = CrashCatcher.previousRunCrashed
+            ? "上次运行捕获到了崩溃（信号或异常），记录在下面。"
+            : "上次运行【没有】捕获到崩溃信号 —— 进程是被系统直接结束的，最常见的原因是内存不够。"
+
+        crashReport = "\(ScowldRootView.buildTag)\n\(verdict)\n\n—— 上一次运行的记录 ——\n\(trail)"
+    }
+
+    static let buildTag = "Scowld 诊断版 v3 · 2026-10-04"
 
     private var appTabs: some View {
         TabView(selection: $selectedTab) {

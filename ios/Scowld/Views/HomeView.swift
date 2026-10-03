@@ -253,9 +253,11 @@ struct HomeView: View {
             updateHandsFreeWakeListener()
         }
         .onDisappear {
+            CrashCatcher.breadcrumb("home: onDisappear")
             stopActiveConversation()
         }
         .onChange(of: isActive) {
+            CrashCatcher.breadcrumb("home: isActive -> \(isActive)")
             if isActive {
                 amicaCoordinator?.setRuntimeActive(true)
                 updateHandsFreeWakeListener()
@@ -1085,6 +1087,7 @@ struct HomeView: View {
     }
 
     private func stopActiveConversation() {
+        CrashCatcher.breadcrumb("stopActiveConversation: begin")
         messageFieldFocused = false
         assistantUnlockTask?.cancel()
         assistantUnlockTask = nil
@@ -1092,13 +1095,18 @@ struct HomeView: View {
         assistantSpeechUnlockTask = nil
         assistantSpeechEarliestEndAt = nil
         resetVoiceInteractionState()
+        CrashCatcher.breadcrumb("stopActiveConversation: voice reset")
         handsFreeWakeListener.stop()
+        CrashCatcher.breadcrumb("stopActiveConversation: wake listener stopped")
         voiceManager.cancelCommandCapture()
+        CrashCatcher.breadcrumb("stopActiveConversation: capture cancelled")
         isAwaitingAssistantResponse = false
         isAssistantSpeaking = false
         aiResponseText = ""
         stopTTS()
+        CrashCatcher.breadcrumb("stopActiveConversation: tts stopped")
         amicaCoordinator?.cancelRuntimeWork()
+        CrashCatcher.breadcrumb("stopActiveConversation: done")
     }
 
     private func finishAssistantTurn() {

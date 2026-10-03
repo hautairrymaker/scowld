@@ -1,5 +1,6 @@
 import Foundation
 import UIKit
+import os
 
 /// Records how far the app got, and — if it dies — why.
 ///
@@ -56,6 +57,13 @@ enum CrashCatcher {
 
     /// Report left behind by the previous run, if it ended badly.
     private(set) static var pendingReport: String?
+    /// Whether the previous run's file actually carried a crash marker. A missing
+    /// marker means the process was ended by the system — usually memory — which
+    /// is a completely different problem from a crash the app can catch.
+    private(set) static var previousRunCrashed = false
+    /// False on the first launch after installing, which is how a build can be
+    /// told apart from an older one that is still on the device.
+    private(set) static var hadPreviousRun = false
 
     static var fileURL: URL { crashLogURL() }
 
@@ -65,12 +73,14 @@ enum CrashCatcher {
         guard !installed else { return }
         installed = true
 
-        // Whatever is on disk was written by the run that just ended. It is only
-        // worth showing if it actually contains a crash.
-        if let text = try? String(contentsOf: crashLogURL(), encoding: .utf8) {
-            if crashMarkers.contains(where: { text.contains($0) }) {
-                pendingReport = tail(of: text)
-            }
+        // Whatever is on disk was written by the run that just ended. It is shown
+        // either way: a trail that stops mid-sentence names the culprit even when
+        // nothing catchable happened.
+        if let text = try? String(contentsOf: crashLogURL(), encoding: .utf8),
+           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            hadPreviousRun = true
+            previousRunCrashed = crashMarkers.contains { text.contains($0) }
+            pendingReport = tail(of: text)
         }
         try? FileManager.default.removeItem(at: crashLogURL())
 
@@ -92,16 +102,36 @@ enum CrashCatcher {
         }
 
         breadcrumb("app launched")
+
+        // Memory pressure that the system survives is still worth knowing about:
+        // the run that follows a warning is the one that usually gets killed.
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            CrashCatcher.breadcrumb("!! MEMORY WARNING")
+        }
     }
 
     // MARK: - Trail
 
     /// Marks progress. Called from places that are about to do something that has
     /// taken the app down before, so the last line in the file names the culprit.
+    ///
+    /// Every line carries how much memory is left. If the system ends the process
+    /// without a signal — which no handler can see — the last line showing almost
+    /// no headroom is the explanation.
     static func breadcrumb(_ text: String) {
         lock.lock()
         defer { lock.unlock() }
-        appendToCrashLog("[\(timestamp())] \(text)\n")
+        appendToCrashLog("[\(timestamp())] \(memoryTag()) \(text)\n")
+    }
+
+    /// Free memory before the system steps in, in megabytes.
+    private static func memoryTag() -> String {
+        let available = Double(os_proc_available_memory()) / 1_048_576
+        return String(format: "[free %5.0f MB]", available)
     }
 
     private static func timestamp() -> String {
