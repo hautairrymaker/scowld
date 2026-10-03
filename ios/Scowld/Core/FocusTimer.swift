@@ -53,6 +53,11 @@ enum FocusTimerSettings {
     static func playsChime(defaults: UserDefaults = .standard) -> Bool {
         defaults.bool(forKey: chimeKey)
     }
+
+    /// Preset lengths offered in Settings. A short list beats a stepper here:
+    /// nobody needs a 37-minute session, and picking from options is one tap.
+    static let focusLengthOptions = [10, 15, 20, 25, 30, 45, 60, 90]
+    static let restLengthOptions = [3, 5, 10, 15, 20, 30]
 }
 
 // MARK: - Modes

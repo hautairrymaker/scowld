@@ -74,6 +74,13 @@ struct SettingsView: View {
     @State private var importedMusic: [AmicaMediaFile] = []
     @State private var isImportingMusic = false
     @State private var ambienceMessage: String?
+    /// Mirrors of the player's state. Views bind to these rather than to the
+    /// player directly, because a Picker may apply its selection while the view
+    /// is still being built — writing to observed state at that point is not
+    /// allowed and takes the app down.
+    @State private var selectedAmbientTrackID = ""
+    @State private var ambientVolume: Double = 0.5
+    @State private var musicLevel: Double = 0.6
     private var ambience: AmbienceAudio { .shared }
     private var focusTimer: FocusTimer { .shared }
     @State private var isImportingAvatar = false
@@ -896,19 +903,29 @@ struct SettingsView: View {
 
             if FocusTimerMode(rawValue: focusTimerModeID) == .countdown {
                 settingRow {
-                    Stepper("Focus: \(focusMinutes) min", value: $focusMinutes, in: 5...180, step: 5)
-                        .onChange(of: focusMinutes) {
-                            guard !isLoadingSettings else { return }
-                            saveFocusTimerSettings()
+                    Picker("Focus", selection: $focusMinutes) {
+                        ForEach(FocusTimerSettings.focusLengthOptions, id: \.self) { minutes in
+                            Text("\(minutes) min").tag(minutes)
                         }
+                    }
+                    .pickerStyle(.menu)
+                    .onChange(of: focusMinutes) {
+                        guard !isLoadingSettings else { return }
+                        saveFocusTimerSettings()
+                    }
                 }
 
                 settingRow {
-                    Stepper("Break: \(restMinutes) min", value: $restMinutes, in: 1...60, step: 1)
-                        .onChange(of: restMinutes) {
-                            guard !isLoadingSettings else { return }
-                            saveFocusTimerSettings()
+                    Picker("Break", selection: $restMinutes) {
+                        ForEach(FocusTimerSettings.restLengthOptions, id: \.self) { minutes in
+                            Text("\(minutes) min").tag(minutes)
                         }
+                    }
+                    .pickerStyle(.menu)
+                    .onChange(of: restMinutes) {
+                        guard !isLoadingSettings else { return }
+                        saveFocusTimerSettings()
+                    }
                 }
 
                 settingRow {
@@ -956,32 +973,31 @@ struct SettingsView: View {
             footer: "Ambience and music are independent: play either one, or both together. Ambient loops ship with the app; music files are yours."
         ) {
             settingRow {
-                Picker("Ambience", selection: Binding(
-                    get: { ambience.track?.rawValue ?? "" },
-                    set: { newValue in
-                        ambience.play(AmbientTrack(rawValue: newValue))
-                    }
-                )) {
+                Picker("Ambience", selection: $selectedAmbientTrackID) {
                     Text("Off").tag("")
                     ForEach(AmbientTrack.allCases) { track in
                         Label(LocalizedStringKey(track.title), systemImage: track.systemImage).tag(track.rawValue)
                     }
                 }
                 .pickerStyle(.menu)
+                .onChange(of: selectedAmbientTrackID) {
+                    guard !isLoadingSettings else { return }
+                    ambience.play(AmbientTrack(rawValue: selectedAmbientTrackID))
+                }
             }
 
             settingRow {
                 HStack(spacing: 10) {
                     Image(systemName: "speaker.wave.1.fill")
                         .foregroundStyle(.secondary)
-                    Slider(value: Binding(
-                        get: { ambience.noiseVolume },
-                        set: { ambience.noiseVolume = $0 }
-                    ), in: 0...1)
+                    Slider(value: $ambientVolume, in: 0...1)
+                        .onChange(of: ambientVolume) {
+                            ambience.noiseVolume = ambientVolume
+                        }
                 }
             }
 
-            Divider().opacity(0.3)
+            Divider().opacity(0.25)
 
             if importedMusic.isEmpty {
                 settingsInfoRow(
@@ -1022,10 +1038,10 @@ struct SettingsView: View {
                     HStack(spacing: 10) {
                         Image(systemName: "speaker.wave.1.fill")
                             .foregroundStyle(.secondary)
-                        Slider(value: Binding(
-                            get: { ambience.musicVolume },
-                            set: { ambience.musicVolume = $0 }
-                        ), in: 0...1)
+                        Slider(value: $musicLevel, in: 0...1)
+                            .onChange(of: musicLevel) {
+                                ambience.musicVolume = musicLevel
+                            }
                     }
                 }
 
@@ -1341,10 +1357,16 @@ struct SettingsView: View {
         FocusTimerSettings.registerDefaults()
         focusTimerEnabled = FocusTimerSettings.isEnabled(defaults: defaults)
         focusTimerModeID = FocusTimerSettings.mode(defaults: defaults).rawValue
-        focusMinutes = FocusTimerSettings.focusMinutes(defaults: defaults)
-        restMinutes = FocusTimerSettings.restMinutes(defaults: defaults)
+        // Snap to the offered presets, so a value saved before the picker existed
+        // still has a matching option to show.
+        focusMinutes = Self.nearest(FocusTimerSettings.focusMinutes(defaults: defaults), in: FocusTimerSettings.focusLengthOptions)
+        restMinutes = Self.nearest(FocusTimerSettings.restMinutes(defaults: defaults), in: FocusTimerSettings.restLengthOptions)
         focusAutoRest = FocusTimerSettings.autoRest(defaults: defaults)
         focusChime = FocusTimerSettings.playsChime(defaults: defaults)
+    }
+
+    private static func nearest(_ value: Int, in options: [Int]) -> Int {
+        options.min(by: { abs($0 - value) < abs($1 - value) }) ?? value
     }
 
     private func saveFocusTimerSettings() {
@@ -1367,6 +1389,9 @@ struct SettingsView: View {
     private func reloadImportedMusic() {
         importedMusic = AmicaUserMedia.importedMusic()
         ambience.refreshMusicLibrary()
+        selectedAmbientTrackID = ambience.track?.rawValue ?? ""
+        ambientVolume = ambience.noiseVolume
+        musicLevel = ambience.musicVolume
     }
 
     private func handleMusicImport(_ result: Result<[URL], Error>) {
