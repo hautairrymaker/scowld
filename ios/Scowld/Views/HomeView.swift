@@ -236,6 +236,7 @@ struct HomeView: View {
                 .presentationDragIndicator(.visible)
         }
         .onAppear {
+            CrashCatcher.breadcrumb("home: appeared")
             FocusTimerSettings.registerDefaults()
             ScowldAudioSession.configureAmicaWebAudioPlayback()
 

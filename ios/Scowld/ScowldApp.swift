@@ -1,9 +1,16 @@
 import SwiftUI
 import StoreKit
+import UIKit
 
 @main
 struct ScowldApp: App {
     @State private var memoryStore = MemoryStore()
+
+    init() {
+        // Installed before any view exists, so a crash while the first screen is
+        // being built is captured as well.
+        CrashCatcher.install()
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -25,6 +32,8 @@ struct ScowldRootView: View {
     @AppStorage("startup_onboarding_completed") private var hasCompletedStartupOnboarding = false
     @State private var selectedTab: ScowldTab = .chat
     @State private var appUpdateState: AppUpdateState = .idle
+    /// Left behind by the previous run when it ended abruptly.
+    @State private var crashReport: String? = CrashCatcher.pendingReport
 
     var body: some View {
         Group {
@@ -38,6 +47,18 @@ struct ScowldRootView: View {
         }
         .task {
             await checkForAppUpdateIfNeeded()
+        }
+        .onChange(of: selectedTab) { _, tab in
+            CrashCatcher.breadcrumb("tab -> \(String(describing: tab))")
+        }
+        .sheet(item: Binding(
+            get: { crashReport.map { CrashReportItem(text: $0) } },
+            set: { if $0 == nil { crashReport = nil } }
+        )) { item in
+            CrashReportView(text: item.text) {
+                crashReport = nil
+                CrashCatcher.clearPendingReport()
+            }
         }
     }
 
@@ -77,6 +98,57 @@ struct ScowldRootView: View {
         guard appUpdateState == .idle else { return }
         appUpdateState = .checking
         appUpdateState = await AppUpdateChecker.check(currentVersion: AppUpdateChecker.currentVersion)
+    }
+}
+
+// MARK: - Crash report
+
+/// Wrapper so the report can drive a `sheet(item:)`.
+struct CrashReportItem: Identifiable {
+    let id = UUID()
+    let text: String
+}
+
+/// Shows what the previous run recorded when it ended abruptly.
+///
+/// Deliberately plain and copyable: the point is to get the text out of the
+/// device, so it can be read off screen or pasted somewhere it can be acted on.
+struct CrashReportView: View {
+    let text: String
+    let onDismiss: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var copied = false
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                Text(text)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
+            }
+            .background(Color.black.ignoresSafeArea())
+            .navigationTitle("Last crash")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Done") {
+                        onDismiss()
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        UIPasteboard.general.string = text
+                        copied = true
+                    } label: {
+                        Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+                    }
+                }
+            }
+        }
     }
 }
 

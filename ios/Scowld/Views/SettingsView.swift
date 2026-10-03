@@ -137,20 +137,9 @@ struct SettingsView: View {
                         }
                     }
 
-                    // The focus timer and ambience sections are built but deliberately
-                    // not shown yet: putting either of them in this view took the whole
-                    // screen down on open. They go back in one at a time so the culprit
-                    // is identified rather than guessed at.
-                    settingsSection(
-                        "Focus Timer & Sound",
-                        icon: "timer",
-                        footer: "Temporarily unavailable while a crash on this screen is being tracked down. The timer and the sound controls are still reachable from the actions menu on the chat screen."
-                    ) {
-                        settingsInfoRow(
-                            title: "Being fixed — use the actions menu for now",
-                            systemImage: "wrench.and.screwdriver"
-                        )
-                    }
+                    focusTimerSection
+
+                    ambienceSection
 
                     aiProviderSection
                     sttProviderSection
@@ -491,7 +480,10 @@ struct SettingsView: View {
                 }
             }
         }
-        .onAppear { loadSettings() }
+        .onAppear {
+            CrashCatcher.breadcrumb("settings: view appeared")
+            loadSettings()
+        }
     }
 
     private var aiProviderSection: some View {
@@ -881,7 +873,8 @@ struct SettingsView: View {
 
     /// The focus session has no controls on the scene itself; everything is here.
     private var focusTimerSection: some View {
-        settingsSection(
+        CrashCatcher.breadcrumb("build: focusTimerSection")
+        return settingsSection(
             "Focus Timer",
             icon: "timer",
             footer: "Turning the device to landscape starts a session automatically; portrait hides the timer but it keeps running. A plain local notification alerts you when a countdown ends."
@@ -978,7 +971,8 @@ struct SettingsView: View {
     // MARK: - Ambience & music
 
     private var ambienceSection: some View {
-        settingsSection(
+        CrashCatcher.breadcrumb("build: ambienceSection")
+        return settingsSection(
             "Ambience & Music",
             icon: "waveform",
             footer: "Ambience and music are independent: play either one, or both together. Ambient loops ship with the app; music files are yours."
@@ -1324,8 +1318,10 @@ struct SettingsView: View {
     // MARK: - Settings Persistence
 
     private func loadSettings() {
+        CrashCatcher.breadcrumb("loadSettings: start")
         isLoadingSettings = true
         HostedServiceConfig.applyBYOKDefaults()
+        CrashCatcher.breadcrumb("loadSettings: after provider defaults")
 
         let defaults = UserDefaults.standard
         selectedAIProviderID = defaults.string(forKey: "selectedProvider") ?? AIProvider.gemini.rawValue
@@ -1334,6 +1330,7 @@ struct SettingsView: View {
         loadSTTBackendSettings(resetMessage: false)
         selectedTTSBackendID = defaults.string(forKey: "amica_tts_backend") ?? TTSBackend.elevenLabs.rawValue
         loadTTSBackendSettings(resetMessage: false)
+        CrashCatcher.breadcrumb("loadSettings: after TTS backend")
         let voiceID = HostedServiceConfig.selectedElevenLabsVoiceID()
         selectedVoicePickerID = ScowldVoiceLibrary.pickerID(for: voiceID)
         customVoiceID = selectedVoicePickerID == ScowldVoiceLibrary.customID ? voiceID : ""
@@ -1352,14 +1349,16 @@ struct SettingsView: View {
         subjectOffset = AmicaSceneSettings.subjectOffset(defaults: defaults)
         zoomMax = AmicaSceneSettings.zoomMax(defaults: defaults)
         reloadImportedAvatars()
-        // Focus timer and ambience settings are intentionally not loaded while the
-        // crash on this screen is being bisected: this view must not touch any of
-        // the new code, so that a clean open proves the problem lies there.
-        importedMusic = AmicaUserMedia.importedMusic()
+        CrashCatcher.breadcrumb("loadSettings: after avatars")
+        loadFocusTimerSettings()
+        CrashCatcher.breadcrumb("loadSettings: after focus timer")
+        reloadImportedMusic()
+        CrashCatcher.breadcrumb("loadSettings: after music")
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             isLoadingSettings = false
             hasCharacterChanges = false
+            CrashCatcher.breadcrumb("loadSettings: done")
         }
     }
 
