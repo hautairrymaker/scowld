@@ -185,21 +185,7 @@ struct HomeView: View {
                 .ignoresSafeArea()
 
                 // Assistant captions
-                VStack(spacing: 6) {
-                    if showAICaption && !aiResponseText.isEmpty {
-                        Text(aiResponseText)
-                            .font(.subheadline)
-                            .foregroundStyle(.white.opacity(0.9))
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
-                            .background(.black.opacity(0.5))
-                            .cornerRadius(16)
-                    }
-                }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 126)
-                .allowsHitTesting(false)
+                assistantCaption
             }
             .navigationTitle("Scowld")
             .navigationBarTitleDisplayMode(.inline)
@@ -410,6 +396,48 @@ struct HomeView: View {
 
     // MARK: - Character actions
 
+    /// What the character is currently saying, over the scene.
+    ///
+    /// A frosted panel rather than the flat black slab this used to be, and it
+    /// fades in and drifts up so it does not simply blink into existence. The
+    /// width is capped so a long sentence stays readable instead of stretching
+    /// edge to edge.
+    private var assistantCaption: some View {
+        VStack(spacing: 0) {
+            if showAICaption, !aiResponseText.isEmpty {
+                Text(aiResponseText)
+                    .font(.callout)
+                    .lineSpacing(3)
+                    .foregroundStyle(.white.opacity(0.95))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: 520)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .strokeBorder(.white.opacity(0.14), lineWidth: 0.5)
+                    )
+                    .shadow(color: .black.opacity(0.3), radius: 16, y: 8)
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.bottom, 126)
+        .animation(.easeOut(duration: 0.28), value: aiResponseText)
+        .animation(.easeOut(duration: 0.22), value: showAICaption)
+        .allowsHitTesting(false)
+    }
+
+    /// Preset levels rather than a slider: a slider is awkward to drag inside a
+    /// menu, and four steps are all an ambient loop needs.
+    private static let volumeSteps: [Double] = [0.25, 0.5, 0.75, 1.0]
+
+    /// Plays one ambient loop at a time. Kept in the actions menu rather than in
+    /// Settings: that screen is the one that has taken the app down before, and a
+    /// quick control next to the character is the more natural place anyway.
+    private var ambience: AmbienceAudio { .shared }
+
     /// Manual triggers for the bundled body animations and VRM expressions.
     /// Before the viewer bridge existed there was no way for the user to make the
     /// character move on demand.
@@ -432,6 +460,34 @@ struct HomeView: View {
                     } label: {
                         Label(expression.title, systemImage: expression.systemImage)
                     }
+                }
+            }
+
+            Section("Sound") {
+                ForEach(AmbientTrack.allCases) { track in
+                    Button {
+                        ambience.toggle(track)
+                    } label: {
+                        Label(
+                            LocalizedStringKey(track.title),
+                            systemImage: ambience.track == track ? "stop.circle.fill" : track.systemImage
+                        )
+                    }
+                }
+
+                Menu {
+                    ForEach(Self.volumeSteps, id: \.self) { level in
+                        Button {
+                            ambience.volume = level
+                        } label: {
+                            Label(
+                                "\(Int(level * 100))%",
+                                systemImage: abs(ambience.volume - level) < 0.01 ? "checkmark" : "circle"
+                            )
+                        }
+                    }
+                } label: {
+                    Label("Volume", systemImage: "speaker.wave.2.fill")
                 }
             }
 
