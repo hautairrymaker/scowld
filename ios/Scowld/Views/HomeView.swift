@@ -227,17 +227,23 @@ struct HomeView: View {
             setupVoice()
             amicaCoordinator?.setRuntimeActive(isActive)
             updateHandsFreeWakeListener()
+            configureProactiveMessenger()
         }
         .onDisappear {
             stopActiveConversation()
+            proactiveMessenger.stop()
         }
         .onChange(of: isActive) {
             if isActive {
                 amicaCoordinator?.setRuntimeActive(true)
                 updateHandsFreeWakeListener()
+                proactiveMessenger.noteInteraction()
+                if proactiveChatEnabled { proactiveMessenger.start() }
             } else {
                 stopActiveConversation()
+                proactiveMessenger.stop()
             }
+            updateProactiveGate()
         }
         .onChange(of: voiceManager.readyCommand) {
             if let text = voiceManager.readyCommand {
@@ -286,6 +292,14 @@ struct HomeView: View {
         .onChange(of: handsFreeModeEnabled) {
             updateHandsFreeWakeListener()
         }
+        // The messenger has to know when a conversation is in progress, and it
+        // cannot look at the view to find out. These mirror the few states that
+        // matter; nothing else about it depends on the view being alive.
+        .onChange(of: isAssistantSpeaking) { updateProactiveGate() }
+        .onChange(of: isAwaitingAssistantResponse) { updateProactiveGate() }
+        .onChange(of: isTapVoiceRecording) { updateProactiveGate() }
+        .onChange(of: messageFieldFocused) { updateProactiveGate() }
+        .onChange(of: scenePhase) { updateProactiveGate() }
         .onChange(of: scenePhase) {
             switch scenePhase {
             case .active:
@@ -441,6 +455,9 @@ struct HomeView: View {
     /// quick control next to the character is the more natural place anyway.
     private var ambience: AmbienceAudio { .shared }
 
+    /// Decides when the character may break the silence.
+    private var proactiveMessenger: ProactiveMessenger { .shared }
+
     /// Manual triggers for the bundled body animations and VRM expressions.
     /// Before the viewer bridge existed there was no way for the user to make the
     /// character move on demand.
@@ -498,10 +515,14 @@ struct HomeView: View {
                 Button {
                     proactiveChatEnabled.toggle()
                     ProactiveChatSettings.registerDefaults()
-                    // The page reads this once, when it loads, so the change only
-                    // takes effect after a reload — the same route a settings
-                    // change already takes.
-                    NotificationCenter.default.post(name: .amicaSettingsChanged, object: nil)
+                    // No reload needed: the gap and the idle threshold are read
+                    // on every tick, so a switch takes effect within a minute.
+                    if proactiveChatEnabled {
+                        proactiveMessenger.noteInteraction()
+                        proactiveMessenger.start()
+                    } else {
+                        proactiveMessenger.stop()
+                    }
                 } label: {
                     Label(
                         proactiveChatEnabled ? "Speak first: On" : "Speak first: Off",
@@ -529,6 +550,62 @@ struct HomeView: View {
     }
 
     /// Fire-and-forget Javascript into the 3D viewer.
+    /// Wires up the character's ability to speak first.
+    ///
+    /// The page is given a *hidden* turn to answer — the same call the native
+    /// side uses for a real message, with the flag that stops it appearing as a
+    /// bubble. That means the line is written by the model with the memory and
+    /// the conversation already in place, and then spoken and captioned by the
+    /// pipeline a normal reply goes through. Nothing about the voice, the lip
+    /// sync or the subtitles had to be rebuilt for it.
+    private func configureProactiveMessenger() {
+        ProactiveChatSettings.registerDefaults()
+
+        let messenger = proactiveMessenger
+        messenger.isForeground = scenePhase == .active
+        messenger.isChatVisible = isActive
+        messenger.isSpeaking = isAssistantSpeaking
+        messenger.isAwaitingReply = isAwaitingAssistantResponse
+        messenger.isRecording = isTapVoiceRecording
+        messenger.isTyping = messageFieldFocused
+
+        // `self` is a value type here, so this captures a copy — which is safe,
+        // because every property it touches is `@State` and those write through
+        // to storage the copies share.
+        messenger.deliver = { prompt in
+            let escaped = prompt
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "'", with: "\\'")
+                .replacingOccurrences(of: "\n", with: " ")
+            isAwaitingAssistantResponse = true
+            scheduleAssistantUnlockFallback(after: 45)
+            ScowldAudioSession.configureAmicaWebAudioPlayback()
+            amicaCoordinator?.webView?.evaluateJavaScript(
+                "window.__scowldSendHidden && window.__scowldSendHidden('\(escaped)');"
+            ) { _, error in
+                if let error {
+                    logger.info("[Proactive] could not deliver: \(error.localizedDescription)")
+                }
+            }
+        }
+
+        if proactiveChatEnabled {
+            messenger.start()
+        } else {
+            messenger.stop()
+        }
+    }
+
+    private func updateProactiveGate() {
+        let messenger = proactiveMessenger
+        messenger.isForeground = scenePhase == .active
+        messenger.isChatVisible = isActive
+        messenger.isSpeaking = isAssistantSpeaking
+        messenger.isAwaitingReply = isAwaitingAssistantResponse
+        messenger.isRecording = isTapVoiceRecording
+        messenger.isTyping = messageFieldFocused
+    }
+
     private func runViewerScript(_ script: String) {
         amicaCoordinator?.webView?.evaluateJavaScript(script) { _, error in
             if let error {
@@ -881,6 +958,8 @@ struct HomeView: View {
         InteractionFeedback.send()
         isAwaitingAssistantResponse = true
         scheduleAssistantUnlockFallback(after: 45)
+        // The user is clearly here, so the silence clock starts again.
+        proactiveMessenger.noteInteraction()
 
         ScowldAudioSession.configureAmicaWebAudioPlayback()
 
@@ -1988,7 +2067,6 @@ struct AmicaFullView: UIViewRepresentable {
         let extraVrmsJS = AmicaUserMedia.importedAvatarPublicPaths()
             .map { "'\($0)'" }
             .joined(separator: ", ")
-        let proactive = ProactiveChatSettings.snapshot(defaults: defaults)
 
         let settingsScript = WKUserScript(
             source: """
@@ -2005,7 +2083,7 @@ struct AmicaFullView: UIViewRepresentable {
                 localStorage.setItem('chatvrm_elevenlabs_voiceid', '\(elevenLabsVoiceId)');
                 localStorage.setItem('chatvrm_elevenlabs_model', '\(elevenLabsModel)');
                 localStorage.setItem('chatvrm_rvc_enabled', 'false');
-                localStorage.setItem('chatvrm_amica_life_enabled', '\(proactive.enabledJS)');
+                localStorage.setItem('chatvrm_amica_life_enabled', 'false');
             } catch(e) {}
             window.__nativeConfig = {
                 chatbot_backend: 'native_ios',
@@ -2017,14 +2095,10 @@ struct AmicaFullView: UIViewRepresentable {
                 elevenlabs_voiceid: '\(elevenLabsVoiceId)',
                 elevenlabs_model: '\(elevenLabsModel)',
                 rvc_enabled: 'false',
-                amica_life_enabled: '\(proactive.enabledJS)',
-                time_before_idle_sec: '\(proactive.idleThreshold)',
-                min_time_interval_sec: '\(proactive.minInterval)',
-                max_time_interval_sec: '\(proactive.maxInterval)',
-                time_to_sleep_sec: '\(proactive.sleepAfter)',
-                reasoning_engine_enabled: 'false',
-                external_api_enabled: 'false',
-                idle_text_prompt: '',
+                // The page's own idle mode stays off: it speaks from a fixed
+                // phrase list without asking the model. The character speaking
+                // first is driven from here instead, with a generated line.
+                amica_life_enabled: 'false',
                 openai_tts_apikey: '\(keychainSentinel)',
                 openai_tts_url: '\(ttsProxyPath)',
                 openai_tts_model: '\(ttsModel)',
@@ -2519,7 +2593,6 @@ struct AmicaFullView: UIViewRepresentable {
             let extraVrmsJS = AmicaUserMedia.importedAvatarPublicPaths()
                 .map { "'\($0)'" }
                 .joined(separator: ", ")
-            let proactive = ProactiveChatSettings.snapshot(defaults: defaults)
 
             let js = """
                 try {
@@ -2528,7 +2601,7 @@ struct AmicaFullView: UIViewRepresentable {
                     localStorage.setItem('chatvrm_elevenlabs_voiceid', '\(elevenLabsVoiceId)');
                     localStorage.setItem('chatvrm_elevenlabs_model', '\(elevenLabsModel)');
                     localStorage.setItem('chatvrm_rvc_enabled', 'false');
-                    localStorage.setItem('chatvrm_amica_life_enabled', '\(proactive.enabledJS)');
+                    localStorage.setItem('chatvrm_amica_life_enabled', 'false');
                 } catch(e) {}
                 window.__nativeConfig = {
                     chatbot_backend: 'native_ios',
@@ -2540,14 +2613,7 @@ struct AmicaFullView: UIViewRepresentable {
                     elevenlabs_voiceid: '\(elevenLabsVoiceId)',
                     elevenlabs_model: '\(elevenLabsModel)',
                     rvc_enabled: 'false',
-                    amica_life_enabled: '\(proactive.enabledJS)',
-                    time_before_idle_sec: '\(proactive.idleThreshold)',
-                    min_time_interval_sec: '\(proactive.minInterval)',
-                    max_time_interval_sec: '\(proactive.maxInterval)',
-                    time_to_sleep_sec: '\(proactive.sleepAfter)',
-                    reasoning_engine_enabled: 'false',
-                    external_api_enabled: 'false',
-                    idle_text_prompt: '',
+                    amica_life_enabled: 'false',
                     openai_tts_apikey: '\(keychainSentinel)',
                     openai_tts_url: '\(ttsProxyPath)',
                     openai_tts_model: '\(ttsModel)',
