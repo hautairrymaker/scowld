@@ -1,16 +1,9 @@
 import SwiftUI
 import StoreKit
-import UIKit
 
 @main
 struct ScowldApp: App {
     @State private var memoryStore = MemoryStore()
-
-    init() {
-        // Installed before any view exists, so a crash while the first screen is
-        // being built is captured as well.
-        CrashCatcher.install()
-    }
 
     var body: some Scene {
         WindowGroup {
@@ -32,8 +25,6 @@ struct ScowldRootView: View {
     @AppStorage("startup_onboarding_completed") private var hasCompletedStartupOnboarding = false
     @State private var selectedTab: ScowldTab = .chat
     @State private var appUpdateState: AppUpdateState = .idle
-    /// Filled in on launch from whatever the previous run left behind.
-    @State private var crashReport: String?
 
     var body: some View {
         Group {
@@ -48,54 +39,7 @@ struct ScowldRootView: View {
         .task {
             await checkForAppUpdateIfNeeded()
         }
-        .onAppear {
-            presentLaunchDiagnostic()
-        }
-        .onChange(of: selectedTab) { _, tab in
-            CrashCatcher.breadcrumb("tab -> \(String(describing: tab))")
-        }
-        .sheet(item: Binding(
-            get: { crashReport.map { CrashReportItem(text: $0) } },
-            set: { if $0 == nil { crashReport = nil } }
-        )) { item in
-            CrashReportView(text: item.text) {
-                crashReport = nil
-                CrashCatcher.clearPendingReport()
-            }
-        }
     }
-
-    /// Reports what the previous run recorded.
-    ///
-    /// Shown whether or not a crash was caught, and on the first launch of a fresh
-    /// install too. A card that always appears is also the only dependable way to
-    /// confirm that this build is the one actually running.
-    private func presentLaunchDiagnostic() {
-        guard crashReport == nil else { return }
-
-        guard let trail = CrashCatcher.pendingReport, CrashCatcher.hadPreviousRun else {
-            crashReport = """
-            \(ScowldRootView.buildTag)
-
-            这是本次安装的第一次启动，所以还没有上一次的记录。
-
-            请按顺序做两件事：
-            1. 点一次「设置」（大概率还是会闪退）
-            2. 重新打开 App —— 这一次就会显示上一次的记录
-
-            如果这张卡片以后再也没有出现过，说明装上的不是这个版本。
-            """
-            return
-        }
-
-        let verdict = CrashCatcher.previousRunCrashed
-            ? "上次运行捕获到了崩溃（信号或异常），记录在下面。"
-            : "上次运行【没有】捕获到崩溃信号 —— 进程是被系统直接结束的，最常见的原因是内存不够。"
-
-        crashReport = "\(ScowldRootView.buildTag)\n\(verdict)\n\n—— 上一次运行的记录 ——\n\(trail)"
-    }
-
-    static let buildTag = "Scowld 诊断版 v3 · 2026-10-04"
 
     private var appTabs: some View {
         TabView(selection: $selectedTab) {
@@ -133,57 +77,6 @@ struct ScowldRootView: View {
         guard appUpdateState == .idle else { return }
         appUpdateState = .checking
         appUpdateState = await AppUpdateChecker.check(currentVersion: AppUpdateChecker.currentVersion)
-    }
-}
-
-// MARK: - Crash report
-
-/// Wrapper so the report can drive a `sheet(item:)`.
-struct CrashReportItem: Identifiable {
-    let id = UUID()
-    let text: String
-}
-
-/// Shows what the previous run recorded when it ended abruptly.
-///
-/// Deliberately plain and copyable: the point is to get the text out of the
-/// device, so it can be read off screen or pasted somewhere it can be acted on.
-struct CrashReportView: View {
-    let text: String
-    let onDismiss: () -> Void
-
-    @Environment(\.dismiss) private var dismiss
-    @State private var copied = false
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                Text(text)
-                    .font(.system(.caption, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(16)
-            }
-            .background(Color.black.ignoresSafeArea())
-            .navigationTitle("Last crash")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Done") {
-                        onDismiss()
-                        dismiss()
-                    }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        UIPasteboard.general.string = text
-                        copied = true
-                    } label: {
-                        Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
-                    }
-                }
-            }
-        }
     }
 }
 

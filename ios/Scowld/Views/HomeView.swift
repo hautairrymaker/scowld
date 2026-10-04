@@ -145,10 +145,8 @@ struct HomeView: View {
     /// Avatar value the page is currently showing, so a change can be swapped in
     /// at runtime instead of reloading the whole web view.
     @State private var appliedAvatarValue: String?
+    /// Set when the viewer refuses a model, so the reason is not swallowed.
     @State private var avatarLoadError: String?
-    /// Shared with Settings, which owns the controls.
-    private var focusTimer: FocusTimer { .shared }
-    private var ambience: AmbienceAudio { .shared }
     @State private var cameraOn = true
     @State private var voiceManager = VoiceManager()
     @State private var handsFreeWakeListener = HandsFreeWakeListener()
@@ -177,13 +175,7 @@ struct HomeView: View {
 
     var body: some View {
         NavigationStack {
-            GeometryReader { proxy in
-                // Landscape is what starts a focus session. Size classes are no use
-                // here — on iPad both orientations report `.regular` — so the view's
-                // own proportions are the only dependable signal.
-                let isLandscape = proxy.size.width > proxy.size.height
-
-                ZStack(alignment: .bottom) {
+            ZStack(alignment: .bottom) {
                 AmicaFullView(memoryStore: memoryStore, onCoordinatorReady: { coord in
                     amicaCoordinator = coord
                     coord.setRuntimeActive(isActive)
@@ -193,24 +185,21 @@ struct HomeView: View {
                 .ignoresSafeArea()
 
                 // Assistant captions
-                assistantCaption
-
-                if isLandscape, FocusTimerSettings.isEnabled() {
-                    focusTimerOverlay
-                        .transition(.move(edge: .top).combined(with: .opacity))
+                VStack(spacing: 6) {
+                    if showAICaption && !aiResponseText.isEmpty {
+                        Text(aiResponseText)
+                            .font(.subheadline)
+                            .foregroundStyle(.white.opacity(0.9))
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(.black.opacity(0.5))
+                            .cornerRadius(16)
+                    }
                 }
-            }
-            .animation(.easeInOut(duration: 0.35), value: isLandscape)
-            .onChange(of: isLandscape) { _, nowLandscape in
-                // Turning the device is the only trigger; there is no start button.
-                // Deferred by one run loop turn because starting a session mutates
-                // observed state, and `onChange` runs inside an update that is
-                // already in flight.
-                guard nowLandscape else { return }
-                Task { @MainActor in
-                    focusTimer.startIfIdle()
-                }
-            }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 126)
+                .allowsHitTesting(false)
             }
             .navigationTitle("Scowld")
             .navigationBarTitleDisplayMode(.inline)
@@ -236,8 +225,6 @@ struct HomeView: View {
                 .presentationDragIndicator(.visible)
         }
         .onAppear {
-            CrashCatcher.breadcrumb("home: appeared")
-            FocusTimerSettings.registerDefaults()
             ScowldAudioSession.configureAmicaWebAudioPlayback()
 
             Task {
@@ -253,11 +240,9 @@ struct HomeView: View {
             updateHandsFreeWakeListener()
         }
         .onDisappear {
-            CrashCatcher.breadcrumb("home: onDisappear")
             stopActiveConversation()
         }
         .onChange(of: isActive) {
-            CrashCatcher.breadcrumb("home: isActive -> \(isActive)")
             if isActive {
                 amicaCoordinator?.setRuntimeActive(true)
                 updateHandsFreeWakeListener()
@@ -301,9 +286,6 @@ struct HomeView: View {
             applyAvatarIfChanged()
             runViewerScript(AmicaViewerBridge.applySceneScript())
         }
-        .onChange(of: handsFreeModeEnabled) {
-            updateHandsFreeWakeListener()
-        }
         .alert("Couldn't load that model", isPresented: Binding(
             get: { avatarLoadError != nil },
             set: { if !$0 { avatarLoadError = nil } }
@@ -311,6 +293,9 @@ struct HomeView: View {
             Button("OK", role: .cancel) { avatarLoadError = nil }
         } message: {
             Text(avatarLoadError ?? "")
+        }
+        .onChange(of: handsFreeModeEnabled) {
+            updateHandsFreeWakeListener()
         }
         .onChange(of: scenePhase) {
             switch scenePhase {
@@ -425,55 +410,6 @@ struct HomeView: View {
 
     // MARK: - Character actions
 
-    /// What the character is currently saying, over the scene.
-    ///
-    /// A frosted panel rather than the flat black slab this used to be, and it
-    /// fades in and drifts up so it does not simply blink into existence. The
-    /// width is capped so a long sentence stays readable instead of stretching
-    /// edge to edge.
-    private var assistantCaption: some View {
-        VStack(spacing: 0) {
-            if showAICaption, !aiResponseText.isEmpty {
-                Text(aiResponseText)
-                    .font(.callout)
-                    .lineSpacing(3)
-                    .foregroundStyle(.white.opacity(0.95))
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 12)
-                    .frame(maxWidth: 520)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .strokeBorder(.white.opacity(0.14), lineWidth: 0.5)
-                    )
-                    .shadow(color: .black.opacity(0.3), radius: 16, y: 8)
-                    .transition(.opacity.combined(with: .move(edge: .bottom)))
-            }
-        }
-        .padding(.horizontal, 20)
-        .padding(.bottom, 126)
-        .animation(.easeOut(duration: 0.28), value: aiResponseText)
-        .animation(.easeOut(duration: 0.22), value: showAICaption)
-        .allowsHitTesting(false)
-    }
-
-    /// The focus timer, pinned to the top-right corner in landscape.
-    private var focusTimerOverlay: some View {
-        VStack {
-            HStack {
-                Spacer(minLength: 0)
-                FocusTimerCard(timer: focusTimer, opacity: 0.96)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.top, 10)
-        .padding(.trailing, 16)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-        .ignoresSafeArea(edges: .top)
-        .allowsHitTesting(false)
-    }
-
     /// Manual triggers for the bundled body animations and VRM expressions.
     /// Before the viewer bridge existed there was no way for the user to make the
     /// character move on demand.
@@ -506,50 +442,6 @@ struct HomeView: View {
                     Label("Reset camera", systemImage: "camera.metering.center.weighted")
                 }
             }
-
-            Section("Sound") {
-                Menu {
-                    ForEach(AmbientTrack.allCases) { track in
-                        Button {
-                            ambience.play(track)
-                        } label: {
-                            Label(LocalizedStringKey(track.title), systemImage: track.systemImage)
-                        }
-                    }
-                } label: {
-                    Label(
-                        ambience.track.map { "Ambience: \($0.title)" } ?? "Ambience",
-                        systemImage: "waveform"
-                    )
-                }
-
-                if ambience.track != nil {
-                    Button(role: .destructive) {
-                        ambience.stopAmbience()
-                    } label: {
-                        Label("Stop ambience", systemImage: "speaker.slash.fill")
-                    }
-                }
-
-                Button {
-                    ambience.toggleMusicPlayback()
-                } label: {
-                    Label(
-                        ambience.isMusicPlaying
-                            ? "Pause music"
-                            : (ambience.currentTrack?.displayName ?? "Play music"),
-                        systemImage: ambience.isMusicPlaying ? "pause.fill" : "music.note"
-                    )
-                }
-
-                if !ambience.musicTracks.isEmpty {
-                    Button {
-                        ambience.nextTrack()
-                    } label: {
-                        Label("Next track", systemImage: "forward.fill")
-                    }
-                }
-            }
         } label: {
             Image(systemName: "sparkles")
                 .font(.system(size: 22, weight: .semibold))
@@ -572,14 +464,6 @@ struct HomeView: View {
 
     /// Swaps the character model when the avatar selection changed. This runs
     /// without reloading the page, so an imported model appears immediately.
-    ///
-    /// Imported models are loaded from `/media/avatars/...`. The page normally
-    /// resolves its model by looking that URL up in a list compiled into it, so the
-    /// bundled list is extended at runtime with `__scowldExtraVrms` to accept those
-    /// URLs. Should that ever stop working — an upstream update, for instance — the
-    /// load is retried through the free `AvatarSample_D` slot, which the local
-    /// server maps onto the same file. The two mechanisms are independent, so the
-    /// second still works when the first does not.
     private func applyAvatarIfChanged() {
         let stored = UserDefaults.standard.string(forKey: "selected_avatar") ?? "AvatarSample_A"
         guard stored != appliedAvatarValue else { return }
@@ -588,13 +472,7 @@ struct HomeView: View {
         guard let webView = amicaCoordinator?.webView else { return }
 
         let displayName = AmicaAvatarSelection.displayName(for: stored, characterName: "")
-        let primaryURL = AmicaAvatarSelection.vrmURL(for: stored)
         let isImported = AmicaAvatarSelection.isImported(stored)
-        let fallbackURL = isImported ? AmicaViewerBridge.customAvatarSlotURL : nil
-
-        // Size of the file we expect the page to receive, used only to explain a
-        // failure. A short download and an unparseable model look identical on
-        // screen, and they need very different fixes.
         let expectedBytes: Int64? = isImported
             ? AmicaUserMedia.slotOverrideFileURL().flatMap { url -> Int64? in
                 let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
@@ -602,131 +480,32 @@ struct HomeView: View {
             }
             : nil
 
-        loadAvatar(
-            urls: Array([primaryURL, fallbackURL].compactMap { $0 }),
-            name: displayName,
-            displayName: displayName,
-            probeURL: primaryURL,
-            expectedBytes: expectedBytes,
-            webView: webView
-        )
-    }
-
-    /// Tries each URL in turn. Only when every option is out — and the stage is
-    /// still empty a moment later — is the user told.
-    private func loadAvatar(
-        urls: [String],
-        name: String,
-        displayName: String,
-        probeURL: String,
-        expectedBytes: Int64?,
-        webView: WKWebView
-    ) {
-        guard let url = urls.first else {
-            verifyAvatarEventuallyLoaded(
-                displayName: displayName,
-                probeURL: probeURL,
-                expectedBytes: expectedBytes,
-                webView: webView
+        // The viewer reports `false` when nothing ended up on screen. Saying so is
+        // the difference between "it didn't work" and knowing which file was
+        // refused — and a model the runtime cannot afford looks identical to a
+        // broken one until the size is checked.
+        webView.evaluateJavaScript(
+            AmicaViewerBridge.loadAvatarScript(
+                url: AmicaAvatarSelection.vrmURL(for: stored),
+                name: displayName
             )
-            return
-        }
-
-        webView.evaluateJavaScript(AmicaViewerBridge.loadAvatarScript(url: url, name: name)) { result, error in
+        ) { result, error in
             if let error {
-                DebugLog.shared.add("[Viewer] avatar swap failed for \(url): \(error.localizedDescription)")
+                DebugLog.shared.add("[Viewer] avatar swap failed: \(error.localizedDescription)")
             }
-            // A JS error and an explicit `false` both mean the model is not on screen.
-            if (result as? Bool) == true { return }
-            DebugLog.shared.add("[Viewer] avatar \(url) was rejected, trying the next option")
-            loadAvatar(
-                urls: Array(urls.dropFirst()),
-                name: name,
-                displayName: displayName,
-                probeURL: probeURL,
-                expectedBytes: expectedBytes,
-                webView: webView
-            )
-        }
-    }
-
-    /// Confirms the stage really is empty before complaining.
-    ///
-    /// Saving an avatar also reloads the page, and the model then loads from the new
-    /// configuration on its own. Reporting a failure from the swap that raced that
-    /// reload would be a false alarm, so the viewer is asked whether anything is on
-    /// screen for a few seconds first.
-    private func verifyAvatarEventuallyLoaded(
-        displayName: String,
-        probeURL: String,
-        expectedBytes: Int64?,
-        webView: WKWebView,
-        attemptsLeft: Int = 8
-    ) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            let probe = "!!(window.__viewer && window.__viewer.model && window.__viewer.model.vrm)"
-            webView.evaluateJavaScript(probe) { result, _ in
-                if (result as? Bool) == true { return }
-                if attemptsLeft > 1 {
-                    verifyAvatarEventuallyLoaded(
-                        displayName: displayName,
-                        probeURL: probeURL,
-                        expectedBytes: expectedBytes,
-                        webView: webView,
-                        attemptsLeft: attemptsLeft - 1
-                    )
-                    return
-                }
-                diagnoseAvatarDelivery(probeURL, expectedBytes: expectedBytes, webView: webView) { detail in
-                    DispatchQueue.main.async {
-                        avatarLoadError = "\"\(displayName)\" could not be loaded, so the previous character is still shown.\(detail)"
-                    }
-                }
+            guard (result as? Bool) != true else { return }
+            var detail = ""
+            if let expectedBytes, expectedBytes > 0 {
+                detail = String(
+                    format: "\n\nThe file is %.1f MB. Models above roughly 30 MB, or with 4096-pixel textures, are usually too large for this device.",
+                    Double(expectedBytes) / 1_048_576
+                )
+            }
+            DispatchQueue.main.async {
+                avatarLoadError = "\"\(displayName)\" could not be loaded. The previous character is still shown.\(detail)"
             }
         }
     }
-
-    /// Asks the page to download the model itself, so a failed load can be told
-    /// apart from a failed transfer.
-    private func diagnoseAvatarDelivery(
-        _ url: String,
-        expectedBytes: Int64?,
-        webView: WKWebView,
-        completion: @escaping (String) -> Void
-    ) {
-        let safeURL = url.replacingOccurrences(of: "'", with: "")
-        let js = """
-        (function() {
-            return fetch('\(safeURL)', { cache: 'no-store' }).then(function(r) {
-                return r.arrayBuffer().then(function(b) {
-                    return r.status + '|' + b.byteLength;
-                });
-            }).catch(function(e) { return '0|0'; });
-        })()
-        """
-
-        webView.evaluateJavaScript(js) { result, _ in
-            guard let raw = result as? String else {
-                completion("")
-                return
-            }
-            let parts = raw.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
-            let status = parts.first ?? "0"
-            let received = parts.count > 1 ? (Int64(parts[1]) ?? 0) : 0
-
-            if status != "200" {
-                completion("\n\nThe file could not be read from the app's storage (HTTP \(status)).")
-            } else if let expected = expectedBytes, expected > 0, received != expected {
-                let got = Double(received) / 1_048_576
-                let want = Double(expected) / 1_048_576
-                completion(String(format: "\n\nThe file arrived incomplete (%.1f MB of %.1f MB).", got, want))
-            } else {
-                let size = Double(received) / 1_048_576
-                completion(String(format: "\n\nThe file arrived complete (%.1f MB), so this model is not one the viewer can display.", size))
-            }
-        }
-    }
-
     private var recordingComposerBar: some View {
         HStack(spacing: 10) {
             Button {
@@ -1087,7 +866,6 @@ struct HomeView: View {
     }
 
     private func stopActiveConversation() {
-        CrashCatcher.breadcrumb("stopActiveConversation: begin")
         messageFieldFocused = false
         assistantUnlockTask?.cancel()
         assistantUnlockTask = nil
@@ -1095,18 +873,13 @@ struct HomeView: View {
         assistantSpeechUnlockTask = nil
         assistantSpeechEarliestEndAt = nil
         resetVoiceInteractionState()
-        CrashCatcher.breadcrumb("stopActiveConversation: voice reset")
         handsFreeWakeListener.stop()
-        CrashCatcher.breadcrumb("stopActiveConversation: wake listener stopped")
         voiceManager.cancelCommandCapture()
-        CrashCatcher.breadcrumb("stopActiveConversation: capture cancelled")
         isAwaitingAssistantResponse = false
         isAssistantSpeaking = false
         aiResponseText = ""
         stopTTS()
-        CrashCatcher.breadcrumb("stopActiveConversation: tts stopped")
         amicaCoordinator?.cancelRuntimeWork()
-        CrashCatcher.breadcrumb("stopActiveConversation: done")
     }
 
     private func finishAssistantTurn() {
@@ -1551,7 +1324,7 @@ class AmicaLocalServer {
         // registered with the list at runtime, but this slot is the safety net:
         // it is always recognised, and it serves whichever imported model is
         // currently selected.
-        if path == "/vrm/AvatarSample_D.vrm" {
+        if path == AmicaViewerBridge.customAvatarSlotURL {
             if let fileURL = AmicaUserMedia.slotOverrideFileURL(),
                let data = try? Data(contentsOf: fileURL, options: .mappedIfSafe) {
                 logger.info("[Server] serving custom avatar through the D slot")
