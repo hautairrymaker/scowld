@@ -148,6 +148,9 @@ struct HomeView: View {
     /// Set when the viewer refuses a model, so the reason is not swallowed.
     @State private var avatarLoadError: String?
     @State private var cameraOn = true
+    /// Whether the character is allowed to start a conversation on its own.
+    /// `@AppStorage` so the menu label and the injected config cannot disagree.
+    @AppStorage(ProactiveChatSettings.enabledKey) private var proactiveChatEnabled = true
     @State private var voiceManager = VoiceManager()
     @State private var handsFreeWakeListener = HandsFreeWakeListener()
     @State private var aiResponseText = ""
@@ -488,6 +491,22 @@ struct HomeView: View {
                     }
                 } label: {
                     Label("Volume", systemImage: "speaker.wave.2.fill")
+                }
+            }
+
+            Section("Proactive") {
+                Button {
+                    proactiveChatEnabled.toggle()
+                    ProactiveChatSettings.registerDefaults()
+                    // The page reads this once, when it loads, so the change only
+                    // takes effect after a reload — the same route a settings
+                    // change already takes.
+                    NotificationCenter.default.post(name: .amicaSettingsChanged, object: nil)
+                } label: {
+                    Label(
+                        proactiveChatEnabled ? "Speak first: On" : "Speak first: Off",
+                        systemImage: proactiveChatEnabled ? "checkmark.circle.fill" : "circle"
+                    )
                 }
             }
 
@@ -1969,6 +1988,7 @@ struct AmicaFullView: UIViewRepresentable {
         let extraVrmsJS = AmicaUserMedia.importedAvatarPublicPaths()
             .map { "'\($0)'" }
             .joined(separator: ", ")
+        let proactive = ProactiveChatSettings.snapshot(defaults: defaults)
 
         let settingsScript = WKUserScript(
             source: """
@@ -1985,7 +2005,7 @@ struct AmicaFullView: UIViewRepresentable {
                 localStorage.setItem('chatvrm_elevenlabs_voiceid', '\(elevenLabsVoiceId)');
                 localStorage.setItem('chatvrm_elevenlabs_model', '\(elevenLabsModel)');
                 localStorage.setItem('chatvrm_rvc_enabled', 'false');
-                localStorage.setItem('chatvrm_amica_life_enabled', 'false');
+                localStorage.setItem('chatvrm_amica_life_enabled', '\(proactive.enabledJS)');
             } catch(e) {}
             window.__nativeConfig = {
                 chatbot_backend: 'native_ios',
@@ -1997,7 +2017,14 @@ struct AmicaFullView: UIViewRepresentable {
                 elevenlabs_voiceid: '\(elevenLabsVoiceId)',
                 elevenlabs_model: '\(elevenLabsModel)',
                 rvc_enabled: 'false',
-                amica_life_enabled: 'false',
+                amica_life_enabled: '\(proactive.enabledJS)',
+                time_before_idle_sec: '\(proactive.idleThreshold)',
+                min_time_interval_sec: '\(proactive.minInterval)',
+                max_time_interval_sec: '\(proactive.maxInterval)',
+                time_to_sleep_sec: '\(proactive.sleepAfter)',
+                reasoning_engine_enabled: 'false',
+                external_api_enabled: 'false',
+                idle_text_prompt: '',
                 openai_tts_apikey: '\(keychainSentinel)',
                 openai_tts_url: '\(ttsProxyPath)',
                 openai_tts_model: '\(ttsModel)',
@@ -2492,6 +2519,7 @@ struct AmicaFullView: UIViewRepresentable {
             let extraVrmsJS = AmicaUserMedia.importedAvatarPublicPaths()
                 .map { "'\($0)'" }
                 .joined(separator: ", ")
+            let proactive = ProactiveChatSettings.snapshot(defaults: defaults)
 
             let js = """
                 try {
@@ -2500,7 +2528,7 @@ struct AmicaFullView: UIViewRepresentable {
                     localStorage.setItem('chatvrm_elevenlabs_voiceid', '\(elevenLabsVoiceId)');
                     localStorage.setItem('chatvrm_elevenlabs_model', '\(elevenLabsModel)');
                     localStorage.setItem('chatvrm_rvc_enabled', 'false');
-                    localStorage.setItem('chatvrm_amica_life_enabled', 'false');
+                    localStorage.setItem('chatvrm_amica_life_enabled', '\(proactive.enabledJS)');
                 } catch(e) {}
                 window.__nativeConfig = {
                     chatbot_backend: 'native_ios',
@@ -2512,7 +2540,14 @@ struct AmicaFullView: UIViewRepresentable {
                     elevenlabs_voiceid: '\(elevenLabsVoiceId)',
                     elevenlabs_model: '\(elevenLabsModel)',
                     rvc_enabled: 'false',
-                    amica_life_enabled: 'false',
+                    amica_life_enabled: '\(proactive.enabledJS)',
+                    time_before_idle_sec: '\(proactive.idleThreshold)',
+                    min_time_interval_sec: '\(proactive.minInterval)',
+                    max_time_interval_sec: '\(proactive.maxInterval)',
+                    time_to_sleep_sec: '\(proactive.sleepAfter)',
+                    reasoning_engine_enabled: 'false',
+                    external_api_enabled: 'false',
+                    idle_text_prompt: '',
                     openai_tts_apikey: '\(keychainSentinel)',
                     openai_tts_url: '\(ttsProxyPath)',
                     openai_tts_model: '\(ttsModel)',
